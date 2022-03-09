@@ -1,0 +1,11 @@
+@charset "utf-8";
+body { font-family:Verdana, Arial, Helvetica, sans-serif; font-size:13px; color:#aaaaaa; background-color:#000000;}
+#userathost { color:#00aa00; font-weight:bold }
+#hash { color:#550000;  font-weight:bold }
+#pass { color:#000000 }
+#asciiz { color:#0033ff }
+#asciiz2 { color:#226666 }
+a {color:#aaaaaa; border-bottom: 1px dotted #ffffff; text-decoration: none;}
+a:visited {color:#aaaaaa; border-bottom: 1px dotted #ffffff; text-decoration: none;}
+a:active { color:#aaaaaa; border-bottom: 1px dotted #ffffff; text-decoration: none;}
+a:hover {color:#aaaaaa; border-bottom: 0px dotted #ffffff; text-decoration: none;}
