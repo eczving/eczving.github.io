@@ -1,0 +1,13 @@
+{
+  "name": "terep",
+  "version": "1.0.0",
+  "description": "Off-road driving sandbox with multiplayer",
+  "main": "server.js",
+  "scripts": {
+    "start": "node server.js",
+    "dev": "nodemon server.js"
+  },
+  "dependencies": {
+    "ws": "^8.20.0"
+  }
+}
