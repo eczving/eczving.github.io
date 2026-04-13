@@ -5,31 +5,20 @@ window.T2 = window.T2 || {};
 // Spring-mass suspension (4 wheels) + simplified bicycle-model rigid body.
 // All physics in SI-ish units (world units ≈ metres, dt in seconds).
 //
-// PHYSICS IMPROVEMENTS:
-//  - Terrain grounding: car floor is clamped per-wheel, not at body centre.
-//    Eliminates the "sucked into terrain" bug on slopes and rough ground.
-//  - Engine torque curve: torque peaks at mid-RPM, drops at redline.
-//    Replaces the flat multiplier that gave Mario Kart-style instant acceleration.
-//  - Flywheel inertia: RPM ramps up/down realistically; releasing throttle
-//    lets RPM fall, engine-braking kicks in.
-//  - Traction / slip model: drive force is gated by a slip ratio. Spinning
-//    wheels lose traction; grip is terrain-surface dependent.
-//  - Weight transfer: braking loads the front, acceleration loads the rear.
-//    Front/rear grip split changes dynamically.
-//  - Speed-sensitive steering: already present, coefficients tightened.
-//  - Airborne: car can now leave the ground when cresting terrain at speed.
-//    The airborne floor uses the lowest wheel-position terrain sample, not
-//    the body centre, so the floor drops away behind a crest instead of
-//    chasing the car upward. A 0.25 m penetration threshold prevents
-//    floating-point jitter from snapping the car back on flat ground.
+// PHYSICS NOTES:
+//  - Terrain grounding: per-wheel contact, not body centre.
+//  - Engine torque curve: peaks at mid-RPM, drops at redline.
+//  - Flywheel inertia: RPM ramps with throttle input.
+//  - Traction / slip: force-based grip cap — full traction at launch,
+//    wheelspin only when commanded force exceeds tyre capacity.
+//  - Weight transfer: braking loads front, acceleration loads rear.
+//  - Airborne: car leaves ground over crests; floor uses lowest
+//    wheel-position terrain sample + 0.25 m penetration threshold.
 //
-// DAMAGE MODEL (unchanged):
-//  - state.health (0-100): drains on car-vs-car collisions, proportional to
-//    impact speed. No health bar — you feel it in the handling.
-//  - Speed is capped at MAX_SPEED * (0.5 + health/200) so a fully-wrecked
-//    car limps at ~50% of normal top speed.
-//  - Visual feedback: brief orange body-tint (damageFlash) + squash animation.
-//  - R-reset restores health to 100 (old-school respawn).
+// DAMAGE MODEL:
+//  - state.health (0-100): drains on collisions proportional to impact speed.
+//  - Speed capped at MAX_SPEED * (0.5 + health/200).
+//  - Visual: orange body-tint flash + squash. R resets health.
 T2.Vehicle = (function () {
 
   // ── Constants ───────────────────────────────────────────────────────────────
@@ -45,39 +34,36 @@ T2.Vehicle = (function () {
   var CAR_MASS            = 1200;
   var BASE_MAX_SPEED      = 28;      // m/s (~100 km/h)
 
-  // Suspension — stiffer spring, more damping for off-road feel
-  var SPRING_K            = 80;      // was 55 — firmer for terrain responsiveness
-  var SPRING_DAMPER       = 10;      // was 7
+  var SPRING_K            = 80;
+  var SPRING_DAMPER       = 10;
   var SPRING_REST         = 0.5;
   var WHEEL_MASS          = 40;
 
-  var MAX_STEER           = 0.50;    // radians (~28°)
+  var MAX_STEER           = 0.50;
   var CAR_COLLISION_RADIUS = 1.4;
 
   // ── Gearbox ─────────────────────────────────────────────────────────────────
   var NUM_GEARS        = 5;
   var RPM_IDLE         = 850;
   var RPM_MAX          = 6200;
-  var GEAR_RATIOS      = [1.65, 1.28, 1.00, 0.80, 0.65]; // torque multipliers
+  var GEAR_RATIOS      = [1.65, 1.28, 1.00, 0.80, 0.65];
   var SHIFT_UP_SPEED   = [5.5, 10.0, 15.5, 21.0];
   var SHIFT_DOWN_SPEED = [3.2,  7.5, 12.0, 17.5];
   var SHIFT_LOCKOUT    = 0.55;
 
   // ── Engine torque curve ─────────────────────────────────────────────────────
-  // Sampled at 0, 20, 40, 60, 80, 100% of RPM band.
-  // Values are multipliers on peak torque (1.0 = peak).
-  // Shape: builds from idle, peaks around 55% RPM, drops off at redline.
   var TORQUE_CURVE     = [0.55, 0.78, 0.95, 1.00, 0.88, 0.65];
-  var PEAK_TORQUE_NM   = 280;    // Nm at peak (realistic for a 1.4t off-roader)
-  var FLYWHEEL_INERTIA = 0.22;   // kg·m² — controls how fast RPM climbs
+  var PEAK_TORQUE_NM   = 280;
+  var FLYWHEEL_INERTIA = 0.22;
 
   // ── Traction model ──────────────────────────────────────────────────────────
-  // Maximum slip ratio before traction drops sharply (0.10 = 10%)
-  var SLIP_THRESHOLD   = 0.12;
-  // Drive wheels: rear-wheel drive (indices 2, 3)
-  var DRIVE_WHEELS     = [2, 3];
-  // Weight transfer coefficient: how much of braking/accel load shifts
-  var WEIGHT_TRANSFER  = 0.18;   // fraction of Mg that shifts front↔rear
+  // Maximum force a tyre can transmit = mu * normal_load.
+  // mu_tyre is the tyre-road friction peak (separate from terrain rolling friction).
+  // When commanded drive force exceeds this cap, excess becomes wheelspin.
+  var MU_TYRE          = 1.1;   // dry tyre peak (typical passenger car)
+  var WHEELSPIN_BLEND  = 6.0;   // how fast grip recovers once force drops back under cap
+
+  var WEIGHT_TRANSFER  = 0.18;
 
   // ── Damage constants ─────────────────────────────────────────────────────────
   var PROP_IMPACT_DURATION   = 0.22;
@@ -104,12 +90,7 @@ T2.Vehicle = (function () {
     currentGear:  0,
     shiftTimer:   0,
     engineRPM:    RPM_IDLE,
-    // Traction state
-    wheelSlipFL:  0,
-    wheelSlipFR:  0,
-    wheelSlipRL:  0,
-    wheelSlipRR:  0,
-    // Damage
+    tractionGrip: 1.0,   // 0-1, recovered each frame
     health:       100,
     damageFlash:  0,
     isWrecked:    false,
@@ -117,7 +98,6 @@ T2.Vehicle = (function () {
 
   var hitCooldowns = {};
 
-  // Per-wheel suspension state
   var wheels = [];
   for (var wi = 0; wi < 4; wi++) {
     wheels.push({
@@ -127,7 +107,7 @@ T2.Vehicle = (function () {
       spinAngle:    0,
       steerAngle:   0,
       contactY:     0,
-      load:         0,    // vertical load on this wheel (N)
+      load:         0,
       group:        null,
       mesh:         null,
     });
@@ -140,7 +120,6 @@ T2.Vehicle = (function () {
   function clamp(v, lo, hi) { return Math.max(lo, Math.min(hi, v)); }
   function lerp(a, b, t)    { return a + (b - a) * t; }
 
-  // Sample the engine torque curve for a given RPM (0-1 normalised)
   function sampleTorqueCurve(rpmNorm) {
     rpmNorm = clamp(rpmNorm, 0, 1);
     var idx = rpmNorm * (TORQUE_CURVE.length - 1);
@@ -215,23 +194,18 @@ T2.Vehicle = (function () {
       if (hitCooldowns[remoteId] && now < hitCooldowns[remoteId]) return;
       hitCooldowns[remoteId] = now + HIT_COOLDOWN;
     }
-
     var damage = Math.min(impactSpeed * DAMAGE_PER_MS, 35);
     state.health      = Math.max(0, state.health - damage);
     state.isWrecked   = state.health <= 0;
     state.damageFlash = DAMAGE_FLASH_DURATION;
     state.impactTimer = PROP_IMPACT_DURATION;
-
     var vol = clamp(impactSpeed / 18, 0.2, 1.0);
     T2.Audio.playImpact(vol);
-
     if (T2.Effects && T2.Effects.spawnImpactBurst) {
       T2.Effects.spawnImpactBurst(
-        { x: state.position.x, y: state.position.y + 0.3, z: state.position.z },
-        vol
+        { x: state.position.x, y: state.position.y + 0.3, z: state.position.z }, vol
       );
     }
-
     if (T2.Network && T2.Network.sendHit && remoteId !== undefined) {
       T2.Network.sendHit(remoteId, damage);
     }
@@ -239,7 +213,6 @@ T2.Vehicle = (function () {
 
   // ── Suspension update ────────────────────────────────────────────────────────
   function updateSuspension(dt) {
-    var totalUpForce = 0;
     var yaw  = state.yaw;
     var cosY = Math.cos(yaw);
     var sinY = Math.sin(yaw);
@@ -272,7 +245,6 @@ T2.Vehicle = (function () {
         wheels[i].compressionY  = clamp(wheels[i].compressionY, -0.12, 0.50);
         wheels[i].isGrounded    = true;
         wheels[i].load          = springForce;
-        totalUpForce           += springForce;
       } else {
         wheels[i].velocity     -= 30 * dt;
         wheels[i].velocity      = Math.max(wheels[i].velocity, -4);
@@ -284,8 +256,6 @@ T2.Vehicle = (function () {
 
       wheels[i].group.position.y = WHEEL_REST_Y - wheels[i].compressionY;
     }
-
-    return totalUpForce;
   }
 
   // ── Rigid body update ────────────────────────────────────────────────────────
@@ -303,14 +273,12 @@ T2.Vehicle = (function () {
     // ── Pitch / roll from terrain ─────────────────────────────────────────────
     var cFL = wheels[0].contactY, cFR = wheels[1].contactY;
     var cRL = wheels[2].contactY, cRR = wheels[3].contactY;
-    var avgFront  = (cFL + cFR) * 0.5;
-    var avgRear   = (cRL + cRR) * 0.5;
-    var avgLeft   = (cFL + cRL) * 0.5;
-    var avgRight  = (cFR + cRR) * 0.5;
-    var targetPitch = Math.atan2(avgFront - avgRear, WHEELBASE);
-    var targetRoll  = Math.atan2(avgRight - avgLeft, 2.2);
-    state.pitch = lerp(state.pitch, targetPitch, 8 * dt);
-    state.roll  = lerp(state.roll,  targetRoll,  8 * dt);
+    var avgFront = (cFL + cFR) * 0.5;
+    var avgRear  = (cRL + cRR) * 0.5;
+    var avgLeft  = (cFL + cRL) * 0.5;
+    var avgRight = (cFR + cRR) * 0.5;
+    state.pitch = lerp(state.pitch, Math.atan2(avgFront - avgRear, WHEELBASE), 8 * dt);
+    state.roll  = lerp(state.roll,  Math.atan2(avgRight - avgLeft, 2.2),      8 * dt);
 
     // ── Gravity ───────────────────────────────────────────────────────────────
     if (!isGrounded) {
@@ -331,11 +299,10 @@ T2.Vehicle = (function () {
       state.velocity.x * state.velocity.x + state.velocity.z * state.velocity.z
     );
 
-    // ── Steering (speed-sensitive, tighter ratio than before) ─────────────────
+    // ── Steering ──────────────────────────────────────────────────────────────
     var steerInput = 0;
     if (T2.Input.steerLeft())  steerInput = -1;
     if (T2.Input.steerRight()) steerInput =  1;
-    // Exponential falloff: aggressive at low speed, precise at high
     var speedFactor    = 1.0 / (1.0 + Math.abs(state.speed) * 0.12);
     var targetSteer    = steerInput * MAX_STEER * speedFactor;
     state.currentSteer = lerp(state.currentSteer, targetSteer, 5 * dt);
@@ -359,77 +326,77 @@ T2.Vehicle = (function () {
       }
     }
 
-    // ── Engine RPM with flywheel inertia ──────────────────────────────────────
-    // Target RPM based on vehicle speed in current gear band
+    // ── Engine RPM ────────────────────────────────────────────────────────────
     var rpmLo = state.currentGear > 0 ? SHIFT_DOWN_SPEED[state.currentGear - 1] : 0;
     var rpmHi = state.currentGear < NUM_GEARS - 1 ? SHIFT_UP_SPEED[state.currentGear] : BASE_MAX_SPEED + 3;
     var rpmT  = clamp((Math.abs(fwdSpeed) - rpmLo) / Math.max(rpmHi - rpmLo, 0.1), 0, 1);
     var targetRPM = RPM_IDLE + (RPM_MAX - RPM_IDLE) * rpmT;
 
-    // Throttle lifts RPM toward target; releasing throttle drops it back
     var throttleInput = T2.Input.throttle() ? 1.0 : 0.0;
     var rpmDelta;
     if (throttleInput > 0) {
-      // Climb toward target RPM, limited by flywheel inertia
       rpmDelta = (targetRPM - state.engineRPM) * (1.0 / FLYWHEEL_INERTIA) * dt * throttleInput;
     } else {
-      // Engine brake: RPM falls toward idle when off throttle
       rpmDelta = (RPM_IDLE - state.engineRPM) * 3.0 * dt;
     }
     state.engineRPM = clamp(state.engineRPM + rpmDelta, RPM_IDLE, RPM_MAX);
 
-    // ── Drive force via torque curve + traction ───────────────────────────────
-    var MAX_SPEED = BASE_MAX_SPEED * (0.5 + state.health / 200);
-
-    // Weight transfer: under braking front wheels get more load, rear less.
-    // Under acceleration the opposite. This affects available traction.
+    // ── Drive force — force-based traction cap ────────────────────────────────
+    // Weight transfer: accel loads rear, braking loads front.
+    var MAX_SPEED   = BASE_MAX_SPEED * (0.5 + state.health / 200);
     var accelSign   = T2.Input.throttle() ? 1 : (T2.Input.brake() ? -1 : 0);
     var weightShift = accelSign * WEIGHT_TRANSFER * CAR_MASS * 9.81;
-    // Front axle load (per wheel), rear axle load (per wheel)
-    var baseFrontLoad = CAR_MASS * 9.81 * 0.5 * 0.5;   // 50% front/rear, 2 wheels
-    var baseRearLoad  = CAR_MASS * 9.81 * 0.5 * 0.5;
-    var frontLoad = baseFrontLoad - weightShift * 0.5;
-    var rearLoad  = baseRearLoad  + weightShift * 0.5;
-    frontLoad = Math.max(frontLoad, 50);
-    rearLoad  = Math.max(rearLoad,  50);
+    var rearLoad    = Math.max(CAR_MASS * 9.81 * 0.5 + weightShift, 100);  // total rear axle (N)
+    var frontLoad   = Math.max(CAR_MASS * 9.81 * 0.5 - weightShift, 100);  // total front axle (N)
 
     var driveForce = 0;
+
     if (isGrounded) {
       if (T2.Input.throttle()) {
-        // Torque curve: look up normalised RPM
-        var rpmNorm     = (state.engineRPM - RPM_IDLE) / (RPM_MAX - RPM_IDLE);
+        var rpmNorm      = (state.engineRPM - RPM_IDLE) / (RPM_MAX - RPM_IDLE);
         var torqueFactor = sampleTorqueCurve(rpmNorm);
-        var rawTorque   = PEAK_TORQUE_NM * torqueFactor * GEAR_RATIOS[state.currentGear];
+        var rawTorque    = PEAK_TORQUE_NM * torqueFactor * GEAR_RATIOS[state.currentGear];
 
-        // Traction: slip ratio = (wheel_surface_speed - car_speed) / car_speed
-        // If wheel spins faster than the car, traction drops
-        var wheelSurfSpeed = state.engineRPM / RPM_MAX * MAX_SPEED;
-        var carSpd         = Math.max(Math.abs(fwdSpeed), 0.5);
-        var slipRatio      = Math.abs(wheelSurfSpeed - carSpd) / carSpd;
-        var tractionGrip   = slipRatio < SLIP_THRESHOLD
-          ? 1.0
-          : clamp(1.0 - (slipRatio - SLIP_THRESHOLD) * 4.0, 0.15, 1.0);
+        // Requested drive force from engine
+        var requestedForce = rawTorque / WHEEL_RADIUS;
 
-        // RWD: only rear wheels provide drive, weighted by rear load
-        var rearTractionLoad = rearLoad / (CAR_MASS * 9.81 * 0.25);
-        driveForce = rawTorque / WHEEL_RADIUS * friction * tractionGrip
-                   * clamp(rearTractionLoad, 0.3, 1.5);
+        // Maximum force rear tyres can transmit before spinning:
+        //   F_max = mu_tyre * normal_load * terrain_friction_modifier
+        // terrain friction already encodes surface grip (mud=0.18, grass=0.65, rock=0.82)
+        var maxTyreForce = MU_TYRE * rearLoad * friction;
+
+        // If requested > max, grip drops proportionally (wheelspin)
+        if (requestedForce <= maxTyreForce) {
+          // Full traction — no slip
+          driveForce = requestedForce;
+          state.tractionGrip = Math.min(1.0, state.tractionGrip + WHEELSPIN_BLEND * dt);
+        } else {
+          // Wheelspin: deliver capped force, reduce grip state
+          var gripRatio = maxTyreForce / requestedForce;
+          state.tractionGrip = lerp(state.tractionGrip, gripRatio, WHEELSPIN_BLEND * dt);
+          driveForce = requestedForce * state.tractionGrip;
+        }
 
       } else if (T2.Input.brake()) {
-        // Braking force uses front-biased weight transfer (front biased 70/30)
+        // Braking: front-biased, capped by front tyre capacity
+        var brakeTorque = PEAK_TORQUE_NM * 1.8;
+        var requestedBrake = brakeTorque / WHEEL_RADIUS;
+        var maxBrakeForce  = MU_TYRE * frontLoad * friction;
         if (state.localVelZ > 0.5) {
-          driveForce = -PEAK_TORQUE_NM * 1.8 * friction
-                     * clamp(frontLoad / (CAR_MASS * 9.81 * 0.25), 0.5, 1.5) / WHEEL_RADIUS;
+          driveForce = -Math.min(requestedBrake, maxBrakeForce);
         } else {
-          // Reverse: limited torque
-          driveForce = -PEAK_TORQUE_NM * 0.7 * friction / WHEEL_RADIUS;
+          // Reverse
+          driveForce = -(PEAK_TORQUE_NM * 0.7 * friction) / WHEEL_RADIUS;
         }
+        state.tractionGrip = Math.min(1.0, state.tractionGrip + WHEELSPIN_BLEND * dt);
+
       } else {
-        // Engine brake when coasting — gentle deceleration matching RPM drop
+        // Engine braking on coast
         var engineBrakeForce = (state.engineRPM - RPM_IDLE) / (RPM_MAX - RPM_IDLE) * 800;
         if (Math.abs(fwdSpeed) > 0.3) {
           driveForce = -Math.sign(fwdSpeed) * engineBrakeForce * friction;
         }
+        state.tractionGrip = Math.min(1.0, state.tractionGrip + WHEELSPIN_BLEND * dt);
       }
     }
 
@@ -446,7 +413,6 @@ T2.Vehicle = (function () {
 
     // ── Aerodynamic drag + rolling resistance ─────────────────────────────────
     if (state.speed > 0.05) {
-      // Aero drag scales quadratically; rolling resistance scales linearly
       var drag      = state.speed * state.speed * 0.025 + state.speed * friction * 0.28;
       var dragDecel = drag / CAR_MASS;
       var invSpeed  = 1 / state.speed;
@@ -479,44 +445,25 @@ T2.Vehicle = (function () {
     state.position.y += state.velocity.y * dt;
     state.position.z += state.velocity.z * dt;
 
-    // ── Terrain grounding — per-wheel, not body centre ────────────────────────
-    // Compute the average contact height of all grounded wheels and enforce
-    // that the body sits at least that high. This is what prevents the car
-    // from sinking into the mesh on slopes where the centre-of-car sample
-    // is lower than where the wheels actually touch.
+    // ── Terrain grounding — per-wheel contact ─────────────────────────────────
     var groundedWheels = 0;
-    var avgContactY    = 0;
     var minContactY    = Infinity;
     for (var gi = 0; gi < 4; gi++) {
       if (wheels[gi].isGrounded) {
-        avgContactY += wheels[gi].contactY;
         if (wheels[gi].contactY < minContactY) minContactY = wheels[gi].contactY;
         groundedWheels++;
       }
     }
     if (groundedWheels > 0) {
-      avgContactY /= groundedWheels;
-      // Body floor is at position.y - 0.6 (half body height).
-      // We want the lowest grounded wheel contact + WHEEL_RADIUS to be the floor.
       var wheelFloor = minContactY + WHEEL_RADIUS + 0.55;
       if (state.position.y < wheelFloor) {
         state.position.y = wheelFloor;
         if (state.velocity.y < 0) state.velocity.y = 0;
       }
     } else {
-      // ── Airborne — car has no grounded wheels ────────────────────────────────
-      // Use the LOWEST terrain height sampled at all four wheel world positions
-      // (not the body centre). On a hill crest the wheels have already passed
-      // the peak, so their samples will be lower than the crest itself.
-      // This means the floor drops away behind the car and does not chase it
-      // upward, allowing the car to naturally leave the ground.
-      //
-      // The floor only fires when the car has genuinely penetrated the terrain
-      // by more than AIRBORNE_PENETRATION_THRESHOLD metres. This prevents
-      // floating-point noise on flat ground from snapping the car back every
-      // tick, while still catching a real fall-through.
-      var AIRBORNE_PENETRATION_THRESHOLD = 0.25;
-
+      // Airborne: use lowest terrain sample at all 4 wheel world positions
+      // so the floor drops away behind a crest instead of chasing the car up.
+      var AIRBORNE_THRESHOLD = 0.25;
       var yawA  = state.yaw;
       var cosA  = Math.cos(yawA);
       var sinA  = Math.sin(yawA);
@@ -528,17 +475,14 @@ T2.Vehicle = (function () {
         var aqh = T2.Terrain.query(state.position.x + awx, state.position.z + awz).height;
         if (aqh < lowestWheelGround) lowestWheelGround = aqh;
       }
-
-      // Absolute floor: body bottom must not go below the lowest wheel ground
-      // minus a small buffer (wheel radius + body half-height).
       var airborneFloor = lowestWheelGround + WHEEL_RADIUS + 0.30;
-      if (state.position.y < airborneFloor - AIRBORNE_PENETRATION_THRESHOLD) {
+      if (state.position.y < airborneFloor - AIRBORNE_THRESHOLD) {
         state.position.y = airborneFloor;
         if (state.velocity.y < 0) state.velocity.y = 0;
       }
     }
 
-    // ── Prop collision ─────────────────────────────────────────────────────────
+    // ── Prop collision ────────────────────────────────────────────────────────
     var propColliders = T2.Props.getColliders();
     for (var pi = 0; pi < propColliders.length; pi++) {
       var pc  = propColliders[pi];
@@ -550,9 +494,8 @@ T2.Vehicle = (function () {
         var d   = Math.sqrt(d2);
         var nx  = pdx / d;
         var nz  = pdz / d;
-        var overlap = minD - d;
-        state.position.x += nx * overlap;
-        state.position.z += nz * overlap;
+        state.position.x += nx * (minD - d);
+        state.position.z += nz * (minD - d);
         var dot = state.velocity.x * nx + state.velocity.z * nz;
         if (dot < 0) {
           var restitution = 0.30;
@@ -560,9 +503,8 @@ T2.Vehicle = (function () {
           state.velocity.z -= (1 + restitution) * dot * nz;
           state.velocity.x *= 0.72;
           state.velocity.z *= 0.72;
-          var impactSpeed = Math.abs(dot);
-          if (impactSpeed > 0.8) {
-            T2.Audio.playImpact(Math.min(impactSpeed / 18, 1));
+          if (Math.abs(dot) > 0.8) {
+            T2.Audio.playImpact(Math.min(Math.abs(dot) / 18, 1));
             state.impactTimer = PROP_IMPACT_DURATION;
           }
         }
@@ -570,7 +512,7 @@ T2.Vehicle = (function () {
       }
     }
 
-    // ── Car-vs-car collision ───────────────────────────────────────────────────
+    // ── Car-vs-car collision ──────────────────────────────────────────────────
     if (T2.Multiplayer && T2.Multiplayer.getColliders) {
       var carColliders = T2.Multiplayer.getColliders();
       for (var ci = 0; ci < carColliders.length; ci++) {
@@ -583,9 +525,8 @@ T2.Vehicle = (function () {
           var cd  = Math.sqrt(cd2);
           var cnx = cdx / cd;
           var cnz = cdz / cd;
-          var coverlap = cMinD - cd;
-          state.position.x += cnx * coverlap * 0.5;
-          state.position.z += cnz * coverlap * 0.5;
+          state.position.x += cnx * (cMinD - cd) * 0.5;
+          state.position.z += cnz * (cMinD - cd) * 0.5;
           var cdot = state.velocity.x * cnx + state.velocity.z * cnz;
           if (cdot < 0) {
             var cRestitution = 0.25;
@@ -593,10 +534,7 @@ T2.Vehicle = (function () {
             state.velocity.z -= (1 + cRestitution) * cdot * cnz;
             state.velocity.x *= 0.78;
             state.velocity.z *= 0.78;
-            var cImpact = Math.abs(cdot);
-            if (cImpact > 1.5) {
-              applyCarHit(cImpact, cc.id);
-            }
+            if (Math.abs(cdot) > 1.5) applyCarHit(Math.abs(cdot), cc.id);
           }
           break;
         }
@@ -604,26 +542,15 @@ T2.Vehicle = (function () {
     }
 
     // ── Timers ────────────────────────────────────────────────────────────────
-    if (state.impactTimer > 0) {
-      state.impactTimer -= dt;
-      if (state.impactTimer < 0) state.impactTimer = 0;
-    }
-    if (state.damageFlash > 0) {
-      state.damageFlash -= dt;
-      if (state.damageFlash < 0) state.damageFlash = 0;
-    }
+    if (state.impactTimer > 0) { state.impactTimer -= dt; if (state.impactTimer < 0) state.impactTimer = 0; }
+    if (state.damageFlash > 0) { state.damageFlash -= dt; if (state.damageFlash < 0) state.damageFlash = 0; }
 
     state.position.x = clamp(state.position.x, -504, 504);
     state.position.z = clamp(state.position.z, -504, 504);
 
     var absRoll = Math.abs(state.roll);
-    if (absRoll > 1.3) {
-      state.flipTimer += dt;
-      state.isFlipped = true;
-    } else {
-      state.flipTimer = 0;
-      state.isFlipped = false;
-    }
+    if (absRoll > 1.3) { state.flipTimer += dt; state.isFlipped = true; }
+    else               { state.flipTimer = 0;   state.isFlipped = false; }
 
     // ── Reset (R) ─────────────────────────────────────────────────────────────
     if (T2.Input.isDown('KeyR')) {
@@ -639,6 +566,7 @@ T2.Vehicle = (function () {
       state.currentGear  = 0;
       state.shiftTimer   = 0;
       state.engineRPM    = RPM_IDLE;
+      state.tractionGrip = 1.0;
       state.health       = 100;
       state.damageFlash  = 0;
       state.isWrecked    = false;
@@ -676,10 +604,10 @@ T2.Vehicle = (function () {
 
     if (bodyMeshRef) {
       if (state.damageFlash > 0) {
-        var t   = state.damageFlash / DAMAGE_FLASH_DURATION;
-        var r = Math.round(lerp(0xc8, 0xff, t));
-        var g = Math.round(lerp(0x38, 0x88, t));
-        var b = Math.round(lerp(0x20, 0x00, t));
+        var t  = state.damageFlash / DAMAGE_FLASH_DURATION;
+        var r  = Math.round(lerp(0xc8, 0xff, t));
+        var g  = Math.round(lerp(0x38, 0x88, t));
+        var b  = Math.round(lerp(0x20, 0x00, t));
         bodyMeshRef.material.color.setRGB(r / 255, g / 255, b / 255);
       } else {
         if (state.health < 40) {
