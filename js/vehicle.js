@@ -218,6 +218,7 @@ T2.Vehicle = (function () {
     var sinY = Math.sin(yaw);
     var pos  = state.position;
 
+    // 1. Calculate base compressions first
     for (var i = 0; i < 4; i++) {
       var wo = WHEEL_OFFSETS[i];
       var wx = wo.x * cosY + wo.z * sinY;
@@ -228,14 +229,29 @@ T2.Vehicle = (function () {
       var worldWheelY = pos.y + WHEEL_REST_Y - wheels[i].compressionY;
 
       var q       = T2.Terrain.query(worldWheelX, worldWheelZ);
-      var groundY = q.height;
-      wheels[i].contactY = groundY;
+      wheels[i].contactY = q.height;
 
-      var currentLen = worldWheelY - WHEEL_RADIUS - groundY;
+      var currentLen = worldWheelY - WHEEL_RADIUS - wheels[i].contactY;
+      wheels[i].currentCompression = Math.max(0, SPRING_REST - currentLen);
+    }
 
-      if (currentLen < SPRING_REST) {
-        var compression = SPRING_REST - currentLen;
-        var springForce = SPRING_K * compression;
+    // 2. Anti-Roll Bar (ARB) calculations (Rally cars have stiff rear ARBs to induce oversteer)
+    var ARB_FRONT = 35.0;
+    var ARB_REAR  = 65.0;
+    var rollFront = (wheels[0].currentCompression - wheels[1].currentCompression) * ARB_FRONT;
+    var rollRear  = (wheels[2].currentCompression - wheels[3].currentCompression) * ARB_REAR;
+
+    // 3. Apply forces
+    for (var i = 0; i < 4; i++) {
+      if (wheels[i].currentCompression > 0) {
+        var springForce = SPRING_K * wheels[i].currentCompression;
+
+        // Apply ARB transfer
+        if (i === 0) springForce += rollFront; // Front Left
+        if (i === 1) springForce -= rollFront; // Front Right
+        if (i === 2) springForce += rollRear;  // Rear Left
+        if (i === 3) springForce -= rollRear;  // Rear Right
+
         var damperForce = SPRING_DAMPER * wheels[i].velocity;
         var netForce    = springForce - damperForce;
         var accel       = netForce / WHEEL_MASS;
@@ -244,7 +260,7 @@ T2.Vehicle = (function () {
         wheels[i].compressionY += wheels[i].velocity * dt;
         wheels[i].compressionY  = clamp(wheels[i].compressionY, -0.12, 0.50);
         wheels[i].isGrounded    = true;
-        wheels[i].load          = springForce;
+        wheels[i].load          = Math.max(0, springForce);
       } else {
         wheels[i].velocity     -= 30 * dt;
         wheels[i].velocity      = Math.max(wheels[i].velocity, -4);
@@ -253,7 +269,6 @@ T2.Vehicle = (function () {
         wheels[i].isGrounded    = false;
         wheels[i].load          = 0;
       }
-
       wheels[i].group.position.y = WHEEL_REST_Y - wheels[i].compressionY;
     }
   }
@@ -404,10 +419,20 @@ T2.Vehicle = (function () {
     state.velocity.x += fwdX * driveAccel * dt;
     state.velocity.z += fwdZ * driveAccel * dt;
 
-    // ── Lateral damping (tyre grip) ───────────────────────────────────────────
+    // ── Lateral damping (Rally Drift Grip) ───────────────────────────────────────────
     var isHandbrake = T2.Input.handbrake();
-    var lateralDamp = isHandbrake ? friction * 1.5 * dt : friction * 14 * dt;
-    lateralDamp     = clamp(lateralDamp, 0, 1);
+
+    // Calculate slip angle (how sideways the car is moving relative to where it's pointing)
+    var slipRatio = Math.abs(state.localVelX) / (Math.abs(state.localVelZ) + 1.0);
+
+    // If slip ratio exceeds threshold, traction breaks and the car slides
+    var slideGripMult = (slipRatio > 0.35) ? 0.35 : 1.0;
+
+    // Base lateral grip is higher, but drops drastically when sliding
+    var lateralBase = isHandbrake ? 1.5 : 18.0;
+    var lateralDamp = friction * lateralBase * slideGripMult * dt;
+
+    lateralDamp = clamp(lateralDamp, 0, 1);
     state.velocity.x -= rtX * state.localVelX * lateralDamp;
     state.velocity.z -= rtZ * state.localVelX * lateralDamp;
 
