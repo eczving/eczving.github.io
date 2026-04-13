@@ -65,6 +65,22 @@ T2.Vehicle = (function () {
 
   var WEIGHT_TRANSFER  = 0.18;
 
+  // ── Slip-angle / rotational-inertia model ────────────────────────────────────
+  // Replaces the kinematic bicycle-yaw and the explicit lateral-damping block.
+  // Yaw now has genuine angular momentum — the car can overshoot turns, slide,
+  // and be caught with counter-steer, just like Terep 2's Deformers engine.
+  var FRONT_AXLE_DIST   = 1.55;   // m — CG to front axle
+  var REAR_AXLE_DIST    = 1.55;   // m — CG to rear axle
+  var CORNERING_STIFF_F = 32000;  // N/rad — front axle cornering stiffness
+  var CORNERING_STIFF_R = 28000;  // N/rad — rear axle cornering stiffness
+  var YAW_INERTIA       = 2000;   // kg·m² — moment of inertia around vertical axis
+
+  // Scales the visual spring loads (SPRING_K tuned for wheel travel only) up to
+  // body-level forces that properly balance gravity.  At SPRING_REST compression
+  // with 4 wheels the total scaled load equals M·g → car sits at equilibrium.
+  // Formula: (M·g) / (4 · K · rest)
+  var SUSP_SCALE = (CAR_MASS * 9.81) / (4.0 * SPRING_K * SPRING_REST);  // ≈ 73.6
+
   // ── Damage constants ─────────────────────────────────────────────────────────
   var PROP_IMPACT_DURATION   = 0.22;
   var DAMAGE_FLASH_DURATION  = 0.30;
@@ -280,11 +296,20 @@ T2.Vehicle = (function () {
     state.pitch = lerp(state.pitch, Math.atan2(avgFront - avgRear, WHEELBASE), 8 * dt);
     state.roll  = lerp(state.roll,  Math.atan2(avgRight - avgLeft, 2.2),      8 * dt);
 
-    // ── Gravity ───────────────────────────────────────────────────────────────
-    if (!isGrounded) {
-      state.velocity.y -= 9.81 * dt;
+    // ── Vertical dynamics: suspension springs drive body bounce ──────────────
+    // At rest all four springs are at ~SPRING_REST compression, so
+    //   totalSpringLoad × SUSP_SCALE ≈ M·g  →  net vertical accel ≈ 0.
+    // Over a crest the springs extend → force drops below M·g → car hops.
+    // Into a dip they compress extra → springs push the body upward → bounce.
+    // The exponential term is the vertical shock-absorber (≈40% critical damp).
+    var totalSpringLoad = 0;
+    for (var si = 0; si < 4; si++) totalSpringLoad += wheels[si].load;
+    if (groundedCount > 0) {
+      var suspForce = totalSpringLoad * SUSP_SCALE;
+      state.velocity.y += (suspForce / CAR_MASS - 9.81) * dt;
+      state.velocity.y *= Math.pow(0.25, dt);  // vertical damping
     } else {
-      if (state.velocity.y < 0) state.velocity.y *= 0.3;
+      state.velocity.y -= 9.81 * dt;
     }
 
     // ── Local velocity decomposition ──────────────────────────────────────────
@@ -404,12 +429,72 @@ T2.Vehicle = (function () {
     state.velocity.x += fwdX * driveAccel * dt;
     state.velocity.z += fwdZ * driveAccel * dt;
 
-    // ── Lateral damping (tyre grip) ───────────────────────────────────────────
+    // ── Slope gravity: car slides downhill on angled terrain ─────────────────
+    // Decomposes gravity into the component that runs along the slope surface.
+    // g_slope = g − (g·n̂)·n̂  → only the XZ components are applied here;
+    // the Y component is handled by the spring model above.
+    if (isGrounded) {
+      var sn    = terrainQ.normal;
+      var gDotN = -9.81 * sn.y;            // dot( (0,−9.81,0), normal )
+      state.velocity.x += (-gDotN * sn.x) * dt;
+      state.velocity.z += (-gDotN * sn.z) * dt;
+    }
+
+    // ── Lateral & yaw — slip-angle model ─────────────────────────────────────
+    // At |vz| ≥ 1.5 m/s we use a dynamic slip-angle tire model:
+    //   • Front & rear slip angles drive independent lateral forces
+    //   • Those forces produce a yaw torque → yaw has inertia (YAW_INERTIA)
+    //   • Handbrake cuts rear cornering stiffness → classic tail-out oversteer
+    //   • Throttle uses the traction circle to trade rear lateral for drive force
+    // Below the threshold a soft kinematic fallback handles parking manoeuvres.
     var isHandbrake = T2.Input.handbrake();
-    var lateralDamp = isHandbrake ? friction * 1.5 * dt : friction * 14 * dt;
-    lateralDamp     = clamp(lateralDamp, 0, 1);
-    state.velocity.x -= rtX * state.localVelX * lateralDamp;
-    state.velocity.z -= rtZ * state.localVelX * lateralDamp;
+    if (isGrounded && Math.abs(state.localVelZ) >= 1.5) {
+      var fwdSign = state.localVelZ > 0 ? 1.0 : -1.0;
+      var absVz   = Math.abs(state.localVelZ);
+
+      // Lateral velocity at each axle in car space (+X = right)
+      var frontLV = state.localVelX + state.yawRate * FRONT_AXLE_DIST;
+      var rearLV  = state.localVelX - state.yawRate * REAR_AXLE_DIST;
+
+      // Slip angles (linear approximation; fwdSign handles reversing correctly)
+      var alphaF = state.currentSteer * fwdSign - frontLV / absVz;
+      var alphaR = -rearLV / absVz;
+
+      // Handbrake kills rear cornering stiffness — rear breaks away
+      var rearCS = isHandbrake ? CORNERING_STIFF_R * 0.12 : CORNERING_STIFF_R;
+      var Ff = CORNERING_STIFF_F * alphaF * friction;
+      var Fr = rearCS           * alphaR * friction;
+
+      // Traction circle: longitudinal drive reduces available rear lateral grip
+      var driveRatio = driveForce / Math.max(MU_TYRE * rearLoad, 1.0);
+      Fr *= Math.sqrt(Math.max(0.0, 1.0 - driveRatio * driveRatio));
+
+      // Coulomb friction cap
+      Ff = clamp(Ff, -MU_TYRE * frontLoad, MU_TYRE * frontLoad);
+      Fr = clamp(Fr, -MU_TYRE * rearLoad,  MU_TYRE * rearLoad);
+
+      // Lateral acceleration in world space
+      var latAccel = (Ff + Fr) / CAR_MASS;
+      state.velocity.x += rtX * latAccel * dt;
+      state.velocity.z += rtZ * latAccel * dt;
+
+      // Yaw torque → angular acceleration (front pushes nose, rear pushes tail)
+      var yawTorque = Ff * FRONT_AXLE_DIST - Fr * REAR_AXLE_DIST;
+      state.yawRate += (yawTorque / YAW_INERTIA) * dt;
+
+    } else if (isGrounded && Math.abs(state.localVelZ) > 0.2) {
+      // ── Low-speed kinematic fallback (parking lot) ────────────────────────
+      var steerSign2     = state.localVelZ > 0 ? 1 : -1;
+      var targetYawRate2 = (state.localVelZ * Math.tan(state.currentSteer) / WHEELBASE) * steerSign2;
+      state.yawRate      = lerp(state.yawRate, targetYawRate2, 8 * dt);
+      var ldamp = clamp(friction * 10 * dt, 0, 1);
+      state.velocity.x -= rtX * state.localVelX * ldamp;
+      state.velocity.z -= rtZ * state.localVelX * ldamp;
+    }
+
+    // Yaw-rate decay (tyres provide most damping at speed; this handles residuals)
+    var yawDecay = isGrounded ? Math.pow(0.25, dt) : Math.pow(0.7, dt);
+    state.yawRate *= yawDecay;
 
     // ── Aerodynamic drag + rolling resistance ─────────────────────────────────
     if (state.speed > 0.05) {
@@ -420,14 +505,7 @@ T2.Vehicle = (function () {
       state.velocity.z -= state.velocity.z * invSpeed * dragDecel * dt;
     }
 
-    // ── Yaw rate (bicycle model) ──────────────────────────────────────────────
-    if (isGrounded && Math.abs(state.localVelZ) > 0.4) {
-      var steerSign     = state.localVelZ > 0 ? 1 : -1;
-      var targetYawRate = (state.localVelZ * Math.tan(state.currentSteer) / WHEELBASE) * steerSign;
-      state.yawRate = lerp(state.yawRate, targetYawRate, 5 * dt);
-    } else {
-      state.yawRate *= Math.pow(0.1, dt);
-    }
+    // ── Yaw integration ───────────────────────────────────────────────────────
     state.yaw += state.yawRate * dt;
 
     // ── Speed cap ─────────────────────────────────────────────────────────────
@@ -458,7 +536,9 @@ T2.Vehicle = (function () {
       var wheelFloor = minContactY + WHEEL_RADIUS + 0.55;
       if (state.position.y < wheelFloor) {
         state.position.y = wheelFloor;
-        if (state.velocity.y < 0) state.velocity.y = 0;
+        // Soft bounce: preserve a fraction of upward rebound velocity on hard
+        // landings rather than killing it instantly (Terep 2 spring behaviour).
+        if (state.velocity.y < 0) state.velocity.y *= 0.1;
       }
     } else {
       // Airborne: use lowest terrain sample at all 4 wheel world positions
