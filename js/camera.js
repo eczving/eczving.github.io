@@ -13,6 +13,11 @@ T2.Camera = (function () {
   var camTarget = new THREE.Vector3();
   var initialised = false;
 
+  // Reusable scratchpad vectors to avoid GC pressure in the update loop
+  var tmp          = new THREE.Vector3();
+  var targetOffset = new THREE.Vector3();
+  var targetLookAt = new THREE.Vector3();
+
   var cWasDown = false;  // for rising-edge detection on C key
 
   var worldUp = new THREE.Vector3(0, 1, 0);
@@ -41,18 +46,15 @@ T2.Camera = (function () {
 
       var mode = MODES[modeIndex];
 
-      // Helper: local point → world point using vehicle group transform
-      var tmp = new THREE.Vector3();
-
       if (mode === 'chase') {
         // Camera sits behind and above the car, target is just ahead
         tmp.set(0, 3.5, -9.0);
         group.localToWorld(tmp);
-        var targetOffset = tmp.clone();
+        targetOffset.copy(tmp);
 
         tmp.set(0, 0.6, 5.0);
         group.localToWorld(tmp);
-        var targetLookAt = tmp.clone();
+        targetLookAt.copy(tmp);
 
         if (!initialised) {
           camPos.copy(targetOffset);
