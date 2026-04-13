@@ -1,0 +1,75 @@
+* { margin: 0; padding: 0; box-sizing: border-box; }
+
+html, body {
+  width: 100%;
+  height: 100%;
+  overflow: hidden;
+  background: #1a2030;
+  font-family: 'Courier New', Courier, monospace;
+}
+
+/* Three.js appends its canvas as first child of body */
+body > canvas:first-of-type {
+  display: block;
+  width: 100% !important;
+  height: 100% !important;
+}
+
+/* HUD overlay */
+#hud-canvas {
+  position: fixed;
+  top: 0;
+  left: 0;
+  width: 100%;
+  height: 100%;
+  pointer-events: none;
+  z-index: 10;
+}
+
+/* Title screen */
+#title-screen {
+  position: fixed;
+  top: 0; left: 0;
+  width: 100%; height: 100%;
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  justify-content: center;
+  z-index: 20;
+  background: #0a1018;
+  transition: opacity 1s ease;
+}
+
+#title-screen.hidden {
+  opacity: 0;
+  pointer-events: none;
+}
+
+#title-text {
+  font-size: clamp(48px, 10vw, 96px);
+  font-weight: bold;
+  letter-spacing: 0.15em;
+  color: #c83820;
+  text-shadow: 0 0 30px rgba(200, 56, 32, 0.5);
+}
+
+#title-sub {
+  font-size: clamp(12px, 2vw, 18px);
+  color: #606878;
+  letter-spacing: 0.3em;
+  margin-top: 8px;
+  text-transform: uppercase;
+}
+
+#title-hint {
+  font-size: clamp(11px, 1.5vw, 14px);
+  color: #404858;
+  letter-spacing: 0.2em;
+  margin-top: 48px;
+  animation: blink 1.4s ease infinite;
+}
+
+@keyframes blink {
+  0%, 100% { opacity: 1; }
+  50% { opacity: 0.2; }
+}
