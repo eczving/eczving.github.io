@@ -266,6 +266,18 @@ T2.Multiplayer = (function () {
 
     getPlayerCount:   function () { return Object.keys(remotePlayers).length; },
     getRemotePlayers: function () { return remotePlayers; },
+
+    // Returns a map of id → { position } for winch / cable logic
+    getPlayers: function () {
+      var out = {};
+      for (var id in remotePlayers) {
+        var p = remotePlayers[id];
+        if (p.group.visible) {
+          out[id] = { position: { x: p.rx, y: p.ry, z: p.rz } };
+        }
+      }
+      return out;
+    },
   };
 
 })();

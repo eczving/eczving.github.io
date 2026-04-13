@@ -5,8 +5,9 @@ window.T2 = window.T2 || {};
 T2.Main = (function () {
 
   var renderer, scene, camera;
-  var lastTime = null;
-  var started  = false;
+  var lastTime  = null;
+  var started   = false;
+  var cableLine = null;
 
   // ── Three.js scene setup ────────────────────────────────────────────────────
   function initThree() {
@@ -72,6 +73,31 @@ T2.Main = (function () {
     // Also kick off the game loop immediately so terrain renders behind the title
   }
 
+  // ── Winch cable visual ───────────────────────────────────────────────────────
+  function updateWinchVisuals() {
+    if (!cableLine) return;
+    var vState  = T2.Vehicle.getState();
+    var winch   = T2.Vehicle.getWinchState();
+    var players = T2.Multiplayer.getPlayers();
+
+    if (winch.active && players[winch.targetId]) {
+      var target    = players[winch.targetId];
+      cableLine.visible = true;
+
+      var positions = cableLine.geometry.attributes.position.array;
+      positions[0]  = vState.position.x;
+      positions[1]  = vState.position.y;
+      positions[2]  = vState.position.z;
+      positions[3]  = target.position.x;
+      positions[4]  = target.position.y;
+      positions[5]  = target.position.z;
+
+      cableLine.geometry.attributes.position.needsUpdate = true;
+    } else {
+      cableLine.visible = false;
+    }
+  }
+
   // ── Game loop ────────────────────────────────────────────────────────────────
   function tick(now) {
     if (lastTime === null) lastTime = now;
@@ -85,6 +111,7 @@ T2.Main = (function () {
     T2.Effects.tick(T2.Vehicle.getState(), dt);
     T2.Camera.tick(dt, camera);
     T2.HUD.tick(T2.Vehicle.getState(), T2.Camera.getMode(), T2.Network.getPlayerCount());
+    updateWinchVisuals();
 
     renderer.render(scene, camera);
     requestAnimationFrame(tick);
@@ -111,6 +138,15 @@ T2.Main = (function () {
     T2.Audio.init();
     T2.Multiplayer.init(scene);
     T2.Network.init();
+
+    // Winch cable line
+    var cableMat = new THREE.LineBasicMaterial({ color: 0x222222, linewidth: 2 });
+    var cableGeo = new THREE.BufferGeometry().setFromPoints([
+      new THREE.Vector3(), new THREE.Vector3()
+    ]);
+    cableLine = new THREE.Line(cableGeo, cableMat);
+    cableLine.visible = false;
+    scene.add(cableLine);
 
     initTitleScreen();
 

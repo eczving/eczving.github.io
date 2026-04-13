@@ -45,26 +45,34 @@ T2.Camera = (function () {
       var tmp = new THREE.Vector3();
 
       if (mode === 'chase') {
-        // Camera sits behind and above the car, target is just ahead
-        tmp.set(0, 3.5, -9.0);
-        group.localToWorld(tmp);
-        var targetOffset = tmp.clone();
+        // Free-look orbit camera: right-click and drag to orbit around the car.
+        var vState   = T2.Vehicle.getState();
+        var carPos   = vState.position;
+        var speed    = vState.speed;
 
-        tmp.set(0, 0.6, 5.0);
-        group.localToWorld(tmp);
-        var targetLookAt = tmp.clone();
+        // Distance grows slightly with speed
+        var distance = 10.0 + (speed * 0.1);
+        var height   = 3.0;
+
+        // Spherical-to-Cartesian using mouse orbit angles
+        var orbitX = T2.Input.mouseOrbit.x;
+        var orbitY = T2.Input.mouseOrbit.y;
+
+        var offsetX = Math.sin(orbitX) * Math.cos(orbitY) * distance;
+        var offsetY = Math.sin(orbitY) * distance + height;
+        var offsetZ = Math.cos(orbitX) * Math.cos(orbitY) * distance;
 
         if (!initialised) {
-          camPos.copy(targetOffset);
-          camTarget.copy(targetLookAt);
+          camPos.set(carPos.x + offsetX, carPos.y + offsetY, carPos.z + offsetZ);
           initialised = true;
         }
 
-        lerp3(camPos,    camPos,    targetOffset, Math.min(1, 3.5 * dt));
-        lerp3(camTarget, camTarget, targetLookAt, Math.min(1, 5.0 * dt));
-
-        camera.position.copy(camPos);
-        camera.lookAt(camTarget);
+        camera.position.set(
+          carPos.x + offsetX,
+          carPos.y + offsetY,
+          carPos.z + offsetZ
+        );
+        camera.lookAt(carPos.x, carPos.y + 1.0, carPos.z);
 
       } else if (mode === 'cockpit') {
         // Rigid mount inside the cabin
