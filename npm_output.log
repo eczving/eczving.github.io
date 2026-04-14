@@ -1,0 +1,25 @@
+
+> terep@1.0.0 start
+> node server.js
+
+Terep running at http://localhost:3000
+  room GLJD9B created
++ p1 created room GLJD9B | room size: 1
+- p1 left room GLJD9B | room size: 0
+  room GLJD9B destroyed (empty)
+  room BGFZKQ created
++ p2 created room BGFZKQ | room size: 1
+- p2 left room BGFZKQ | room size: 0
+  room BGFZKQ destroyed (empty)
+  room NM266U created
++ p3 created room NM266U | room size: 1
+- p3 left room NM266U | room size: 0
+  room NM266U destroyed (empty)
+  room SY8DJA created
++ p4 created room SY8DJA | room size: 1
+- p4 left room SY8DJA | room size: 0
+  room SY8DJA destroyed (empty)
+  room FLNT9R created
++ p5 created room FLNT9R | room size: 1
+- p5 left room FLNT9R | room size: 0
+  room FLNT9R destroyed (empty)
