@@ -9,8 +9,10 @@ T2.Audio = (function () {
 
   var ctx          = null;
   var engineGain   = null;
-  var engineOsc1   = null;   // sawtooth — main rumble
-  var engineOsc2   = null;   // sine    — sub-bass body
+  var engineOsc1   = null;   // Main cylinder rumble
+  var engineOsc2   = null;   // Detuned cylinder rumble
+  var turboOsc     = null;   // High pitch turbo spool
+  var turboGain    = null;
   var engineFilter = null;
   var ready        = false;
 
@@ -42,35 +44,35 @@ T2.Audio = (function () {
     try {
       ctx = new (window.AudioContext || window.webkitAudioContext)();
 
-      // Master engine gain node (starts silent)
       engineGain = ctx.createGain();
       engineGain.gain.value = 0;
       engineGain.connect(ctx.destination);
 
-      // Low-pass filter for engine timbre shaping
       engineFilter = ctx.createBiquadFilter();
       engineFilter.type = 'lowpass';
-      engineFilter.frequency.value = 280;
-      engineFilter.Q.value = 1.8;
       engineFilter.connect(engineGain);
 
-      // Primary oscillator — sawtooth engine body
+      // Main gritty engine tone
       engineOsc1 = ctx.createOscillator();
       engineOsc1.type = 'sawtooth';
-      engineOsc1.frequency.value = 48;
       engineOsc1.connect(engineFilter);
       engineOsc1.start();
 
-      // Secondary oscillator — sub-bass (quieter, half frequency)
-      var subGain = ctx.createGain();
-      subGain.gain.value = 0.38;
-      subGain.connect(engineGain);
-
+      // Slightly detuned second oscillator for a thicker, angrier engine sound
       engineOsc2 = ctx.createOscillator();
-      engineOsc2.type = 'sine';
-      engineOsc2.frequency.value = 24;
-      engineOsc2.connect(subGain);
+      engineOsc2.type = 'sawtooth';
+      engineOsc2.connect(engineFilter);
       engineOsc2.start();
+
+      // Turbo Spool setup
+      turboGain = ctx.createGain();
+      turboGain.gain.value = 0;
+      turboGain.connect(ctx.destination);
+
+      turboOsc = ctx.createOscillator();
+      turboOsc.type = 'sine'; // Clean whistle
+      turboOsc.connect(turboGain);
+      turboOsc.start();
 
       // ── Terrain rolling sound ─────────────────────────────────────────────
       // Two-second white-noise loop shaped by a BiquadFilter per terrain type.
@@ -137,6 +139,31 @@ T2.Audio = (function () {
     src.start();
   }
 
+  // Generates a harsh noise burst for backfire / exhaust pops
+  function playExhaustPop() {
+    if (!ready) return;
+    var bufLen = Math.floor(ctx.sampleRate * 0.15);
+    var buffer = ctx.createBuffer(1, bufLen, ctx.sampleRate);
+    var data   = buffer.getChannelData(0);
+    for (var i = 0; i < bufLen; i++) {
+      data[i] = (Math.random() * 2 - 1) * Math.pow(1 - i / bufLen, 3.0); // sharp decay
+    }
+    var popSrc = ctx.createBufferSource();
+    popSrc.buffer = buffer;
+
+    var popFilter = ctx.createBiquadFilter();
+    popFilter.type = 'lowpass';
+    popFilter.frequency.value = 1500 + Math.random() * 1000;
+
+    var popGain = ctx.createGain();
+    popGain.gain.value = 0.4 + Math.random() * 0.3;
+
+    popSrc.connect(popFilter);
+    popFilter.connect(popGain);
+    popGain.connect(ctx.destination);
+    popSrc.start();
+  }
+
   // ── Public API ───────────────────────────────────────────────────────────────
   return {
 
@@ -173,19 +200,33 @@ T2.Audio = (function () {
       // dipFactor: 0.4 at start of dip, eases back to 1.0
       var dipFactor = shiftDip > 0 ? (0.40 + 0.60 * (1 - shiftDip / SHIFT_DIP_DUR)) : 1.0;
 
-      // Oscillator frequency tracks RPM: ~42 Hz at idle, ~175 Hz at redline
+      // Oscillator frequency tracks RPM
       var baseFreq = 42 + rpmNorm * 133 + (throttle ? 14 : 0);
-      engineOsc1.frequency.setTargetAtTime(baseFreq,       ctx.currentTime, 0.06);
-      engineOsc2.frequency.setTargetAtTime(baseFreq * 0.5, ctx.currentTime, 0.06);
+      engineOsc1.frequency.setTargetAtTime(baseFreq, ctx.currentTime, 0.06);
+      // Detune the second oscillator slightly to create phase-phasing (grittiness)
+      engineOsc2.frequency.setTargetAtTime(baseFreq * 1.015, ctx.currentTime, 0.06);
 
       // Volume: quiet at idle, louder under load, dipped on gear change
-      var targetGain = (0.10 + rpmNorm * 0.10 + (throttle ? 0.05 : 0)) * dipFactor;
-      if (brake && vehicleState.localVelZ > 1) targetGain += 0.015 * dipFactor;
+      var targetGain = (0.15 + rpmNorm * 0.15 + (throttle ? 0.1 : 0)) * dipFactor;
       engineGain.gain.setTargetAtTime(targetGain, ctx.currentTime, 0.04);
 
-      // Filter cutoff rises with RPM — brighter high-rev tone
-      var cutoff = 200 + rpmNorm * 700 + (throttle ? 150 : 0);
+      // Filter cutoff rises with RPM
+      var cutoff = 300 + rpmNorm * 1200 + (throttle ? 400 : 0);
       engineFilter.frequency.setTargetAtTime(cutoff, ctx.currentTime, 0.06);
+
+      // --- TURBO LOGIC ---
+      var isSpooling = throttle && rpmNorm > 0.35;
+      var turboTargetFreq = 2000 + rpmNorm * 6000; // Whines up to 8kHz
+      var turboTargetGain = isSpooling ? (0.02 + rpmNorm * 0.08) : 0.0;
+
+      turboOsc.frequency.setTargetAtTime(turboTargetFreq, ctx.currentTime, 0.2); // Slower frequency ramp
+      turboGain.gain.setTargetAtTime(turboTargetGain, ctx.currentTime, isSpooling ? 0.3 : 0.1); // Spools up slow, vents fast
+
+      // --- EXHAUST POPS ---
+      // Randomly trigger backfires when off-throttle at high RPM
+      if (!throttle && rpmNorm > 0.6 && Math.random() < 0.05) {
+        playExhaustPop();
+      }
 
       // ── Terrain rolling sound ─────────────────────────────────────────────
       var surfName = vehicleState.surfaceType ? vehicleState.surfaceType.name : '';
