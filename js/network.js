@@ -24,7 +24,6 @@ T2.Network = (function () {
   // Hit message cooldown — keyed by victimId
   var hitCooldowns  = {};
   var HIT_COOLDOWN  = 0.15;   // seconds
-  var hitAccum      = 0;      // shares the same dt accumulator as tick()
 
   var _onRoomReady  = null;
 
