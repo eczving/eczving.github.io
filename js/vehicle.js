@@ -115,6 +115,13 @@ T2.Vehicle = (function () {
 
   var hitCooldowns = {};
 
+  // ── Winch state ──────────────────────────────────────────────────────────────
+  var winchState = {
+    active:     false,
+    targetId:   null,
+    restLength: 10.0,   // cable rest length in metres
+  };
+
   var wheels = [];
   for (var wi = 0; wi < 4; wi++) {
     wheels.push({
@@ -666,6 +673,32 @@ T2.Vehicle = (function () {
     }
   }
 
+  // ── Winch spring force ───────────────────────────────────────────────────────
+  function applyWinchForces(dt) {
+    if (!winchState.active) return;
+    var players = (T2.Multiplayer && T2.Multiplayer.getPlayers) ? T2.Multiplayer.getPlayers() : {};
+    var target  = players[winchState.targetId];
+    if (!target) {
+      winchState.active   = false;
+      winchState.targetId = null;
+      return;
+    }
+
+    var dx   = target.position.x - state.position.x;
+    var dy   = target.position.y - state.position.y;
+    var dz   = target.position.z - state.position.z;
+    var dist = Math.sqrt(dx * dx + dy * dy + dz * dz);
+
+    // Hooke's Law: only pull when stretched beyond rest length
+    if (dist > winchState.restLength) {
+      var k     = 800.0;   // spring stiffness (N/m)
+      var force = (dist - winchState.restLength) * k;
+      state.velocity.x += (dx / dist) * force * dt / CAR_MASS;
+      state.velocity.y += (dy / dist) * force * dt / CAR_MASS;
+      state.velocity.z += (dz / dist) * force * dt / CAR_MASS;
+    }
+  }
+
   // ── Wheel spin visuals ───────────────────────────────────────────────────────
   function updateWheelSpin(dt) {
     var spinDelta = state.localVelZ * dt / WHEEL_RADIUS;
@@ -721,12 +754,43 @@ T2.Vehicle = (function () {
     tick: function (dt) {
       updateSuspension(dt);
       updateBody(dt);
+      applyWinchForces(dt);
       updateWheelSpin(dt);
       applyToScene();
     },
 
-    getState:  function () { return state; },
-    getGroup:  function () { return vehicleGroup; },
+    getState:      function () { return state; },
+    getGroup:      function () { return vehicleGroup; },
+    getWinchState: function () { return winchState; },
+
+    toggleWinch: function () {
+      if (winchState.active) {
+        winchState.active   = false;
+        winchState.targetId = null;
+        console.log('Winch detached');
+      } else {
+        var players     = (T2.Multiplayer && T2.Multiplayer.getPlayers) ? T2.Multiplayer.getPlayers() : {};
+        var closestDist = 20.0;   // max attach distance (m)
+        var closestId   = null;
+
+        for (var wid in players) {
+          var wp  = players[wid];
+          var wdx = wp.position.x - state.position.x;
+          var wdz = wp.position.z - state.position.z;
+          var wd  = Math.sqrt(wdx * wdx + wdz * wdz);
+          if (wd < closestDist) {
+            closestDist = wd;
+            closestId   = wid;
+          }
+        }
+
+        if (closestId) {
+          winchState.active   = true;
+          winchState.targetId = closestId;
+          console.log('Winch attached to player ' + closestId);
+        }
+      }
+    },
 
     applyRemoteDamage: function (damage) {
       state.health     = Math.max(0, state.health - damage);
