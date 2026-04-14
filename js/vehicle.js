@@ -99,6 +99,7 @@ T2.Vehicle = (function () {
     localVelZ:    0,
     localVelX:    0,
     surfaceType:  null,
+    isGrounded:   false,
     isFlipped:    false,
     flipTimer:    0,
     currentSteer: 0,
@@ -281,6 +282,7 @@ T2.Vehicle = (function () {
       if (wheels[i].isGrounded) groundedCount++;
     }
     var isGrounded = groundedCount >= 2;
+    state.isGrounded = isGrounded;
 
     var terrainQ = T2.Terrain.query(state.position.x, state.position.z);
     var friction = terrainQ.surfaceType.friction;
@@ -499,6 +501,11 @@ T2.Vehicle = (function () {
     // ── Aerodynamic drag + rolling resistance ─────────────────────────────────
     if (state.speed > 0.05) {
       var drag      = state.speed * state.speed * 0.025 + state.speed * friction * 0.28;
+      if (state.surfaceType && state.surfaceType.name === 'DEEP WATER') {
+        drag += state.speed * state.speed * 1.5 + state.speed * 4.0;
+      } else if (state.surfaceType && state.surfaceType.name === 'WATER') {
+        drag += state.speed * state.speed * 0.6 + state.speed * 1.5;
+      }
       var dragDecel = drag / CAR_MASS;
       var invSpeed  = 1 / state.speed;
       state.velocity.x -= state.velocity.x * invSpeed * dragDecel * dt;

@@ -18,14 +18,14 @@ window.T2 = window.T2 || {};
 //   "struggling" signal without any UI.
 T2.Effects = (function () {
 
-  var MAX_PARTICLES = 350;   // raised from 250 to accommodate sparks + smoke
+  var MAX_PARTICLES = 2500;   // raised from 250 to accommodate sparks + smoke
 
   var FX_CONFIG = {
-    'DEEP WATER': { r: 0.26, g: 0.50, b: 0.83, rate: 12, upMin: 2.0, upMax: 4.5, spread: 1.8, kick: 2.5, decay: 0.90 },
-    'WATER':      { r: 0.37, g: 0.67, b: 0.91, rate:  9, upMin: 1.5, upMax: 3.5, spread: 1.4, kick: 2.0, decay: 0.90 },
-    'MUD':        { r: 0.48, g: 0.33, b: 0.12, rate:  7, upMin: 1.0, upMax: 2.8, spread: 1.0, kick: 1.5, decay: 1.00 },
-    'GRASS':      { r: 0.24, g: 0.56, b: 0.11, rate:  5, upMin: 0.6, upMax: 1.8, spread: 0.8, kick: 1.2, decay: 1.10 },
-    'HIGHLAND':   { r: 0.63, g: 0.50, b: 0.29, rate:  5, upMin: 0.5, upMax: 1.5, spread: 0.7, kick: 1.0, decay: 1.10 },
+    'DEEP WATER': { r: 0.26, g: 0.50, b: 0.83, rate: 30, upMin: 2.0, upMax: 5.5, spread: 2.5, kick: 3.5, decay: 0.70, size: 0.5 },
+    'WATER':      { r: 0.37, g: 0.67, b: 0.91, rate: 25, upMin: 1.5, upMax: 4.5, spread: 2.0, kick: 3.0, decay: 0.75, size: 0.4 },
+    'MUD':        { r: 0.38, g: 0.26, b: 0.10, rate: 40, upMin: 2.0, upMax: 4.5, spread: 1.8, kick: 3.5, decay: 0.60, size: 0.7 },
+    'GRASS':      { r: 0.18, g: 0.45, b: 0.08, rate: 35, upMin: 1.5, upMax: 3.5, spread: 1.5, kick: 3.0, decay: 0.80, size: 0.6 },
+    'HIGHLAND':   { r: 0.53, g: 0.40, b: 0.20, rate: 15, upMin: 0.8, upMax: 2.5, spread: 1.0, kick: 1.5, decay: 1.00, size: 0.4 },
     'ROCK':       { r: 0.56, g: 0.55, b: 0.50, rate:  6, upMin: 0.6, upMax: 2.0, spread: 0.5, kick: 1.2, decay: 1.20 },
     'HIGH ROCK':  { r: 0.69, g: 0.69, b: 0.63, rate:  5, upMin: 0.6, upMax: 1.8, spread: 0.5, kick: 1.0, decay: 1.20 },
     'SNOW':       { r: 0.91, g: 0.91, b: 0.97, rate: 10, upMin: 1.2, upMax: 3.0, spread: 1.5, kick: 1.8, decay: 0.80 },
@@ -76,7 +76,7 @@ T2.Effects = (function () {
     geo.setAttribute('color',    colorAttr);
 
     var mat = new THREE.PointsMaterial({
-      size:            0.38,
+      size:            0.85,
       vertexColors:    true,
       transparent:     true,
       opacity:         1.0,
@@ -96,15 +96,15 @@ T2.Effects = (function () {
     var py   = vs.position.y - 0.5;
     var pz   = vs.position.z;
 
-    for (var i = 0; i < 2 && particles.length < MAX_PARTICLES; i++) {
-      var wo = REAR_OFFSETS[i];
+    for (var i = 0; i < 4 && particles.length < MAX_PARTICLES; i++) {
+      var wo = REAR_OFFSETS[i % 2];
       var wx = px + wo.ox * cosY + wo.oz * sinY + (Math.random() - 0.5) * cfg.spread;
       var wz = pz - wo.ox * sinY + wo.oz * cosY + (Math.random() - 0.5) * cfg.spread;
       particles.push({
         x: wx, y: py, z: wz,
-        vx: (Math.random() - 0.5) * cfg.kick,
+        vx: (Math.random() - 0.5) * cfg.kick - sinY * vs.speed * 0.1,
         vy: cfg.upMin + Math.random() * (cfg.upMax - cfg.upMin),
-        vz: (Math.random() - 0.5) * cfg.kick,
+        vz: (Math.random() - 0.5) * cfg.kick - cosY * vs.speed * 0.1,
         life:  1.0,
         decay: cfg.decay * (0.8 + Math.random() * 0.4),
         r: cfg.r, g: cfg.g, b: cfg.b,
@@ -188,8 +188,8 @@ T2.Effects = (function () {
 
     // Wheel spray
     var MIN_SPEED = 2.0;
-    if (cfg && speed > MIN_SPEED) {
-      var spawnInterval = 1.0 / (cfg.rate * Math.min(speed / 8.0, 1.5));
+    if (cfg && speed > MIN_SPEED && vs.isGrounded !== false) {
+      var spawnInterval = 1.0 / (cfg.rate * Math.max(1.0, speed / 5.0));
       spawnAccum += dt;
       while (spawnAccum >= spawnInterval) {
         spawnBatch(vs, cfg);
