@@ -254,13 +254,22 @@ T2.Vehicle = (function () {
       if (wheels[i].currentCompression > 0) {
         var springForce = SPRING_K * wheels[i].currentCompression;
 
+        // Bump stop (extra stiffness near max compression)
+        if (wheels[i].currentCompression > 0.45) {
+          springForce += (wheels[i].currentCompression - 0.45) * 800;
+        }
+
         // Apply ARB transfer
         if (i === 0) springForce += rollFront; // Front Left
         if (i === 1) springForce -= rollFront; // Front Right
         if (i === 2) springForce += rollRear;  // Rear Left
         if (i === 3) springForce -= rollRear;  // Rear Right
 
-        var damperForce = SPRING_DAMPER * wheels[i].velocity;
+        // Separate bump and rebound damping
+        var isRebound = wheels[i].velocity > 0;
+        var currentDamper = isRebound ? SPRING_DAMPER * 1.5 : SPRING_DAMPER * 0.8;
+        var damperForce = currentDamper * wheels[i].velocity;
+
         var netForce    = springForce - damperForce;
         var accel       = netForce / WHEEL_MASS;
 
@@ -301,8 +310,21 @@ T2.Vehicle = (function () {
     var avgRear  = (cRL + cRR) * 0.5;
     var avgLeft  = (cFL + cRL) * 0.5;
     var avgRight = (cFR + cRR) * 0.5;
-    state.pitch = lerp(state.pitch, Math.atan2(avgFront - avgRear, WHEELBASE), 8 * dt);
-    state.roll  = lerp(state.roll,  Math.atan2(avgRight - avgLeft, 2.2),      8 * dt);
+
+    if (isGrounded) {
+      state.pitch = lerp(state.pitch, Math.atan2(avgFront - avgRear, WHEELBASE), 8 * dt);
+      state.roll  = lerp(state.roll,  Math.atan2(avgRight - avgLeft, 2.2),      8 * dt);
+    } else {
+      // Air control
+      var pitchInput = (T2.Input.brake() ? 1 : 0) - (T2.Input.throttle() ? 1 : 0);
+      var rollInput  = (T2.Input.steerRight() ? 1 : 0) - (T2.Input.steerLeft() ? 1 : 0);
+      state.pitch += pitchInput * 1.5 * dt;
+      state.roll  += rollInput * 2.5 * dt;
+
+      // Auto-leveling slowly
+      state.pitch = lerp(state.pitch, 0, 0.5 * dt);
+      state.roll  = lerp(state.roll, 0, 0.5 * dt);
+    }
 
     // ── Gravity ───────────────────────────────────────────────────────────────
     if (!isGrounded) {
@@ -357,6 +379,13 @@ T2.Vehicle = (function () {
     var targetRPM = RPM_IDLE + (RPM_MAX - RPM_IDLE) * rpmT;
 
     var throttleInput = T2.Input.throttle() ? 1.0 : 0.0;
+
+    // Simulate clutch slip / engine revving when traction is broken
+    if (throttleInput > 0 && state.tractionGrip < 0.95) {
+      var slipRPM = (1.0 - state.tractionGrip) * (RPM_MAX - RPM_IDLE) * 0.5;
+      targetRPM = Math.min(RPM_MAX, targetRPM + slipRPM);
+    }
+
     var rpmDelta;
     if (throttleInput > 0) {
       rpmDelta = (targetRPM - state.engineRPM) * (1.0 / FLYWHEEL_INERTIA) * dt * throttleInput;
@@ -380,6 +409,11 @@ T2.Vehicle = (function () {
         var rpmNorm      = (state.engineRPM - RPM_IDLE) / (RPM_MAX - RPM_IDLE);
         var torqueFactor = sampleTorqueCurve(rpmNorm);
         var rawTorque    = PEAK_TORQUE_NM * torqueFactor * GEAR_RATIOS[state.currentGear];
+
+        // Torque interruption during shifts
+        if (state.shiftTimer > 0) {
+          rawTorque *= 0.2;
+        }
 
         // Requested drive force from engine
         var requestedForce = rawTorque / WHEEL_RADIUS;
@@ -434,8 +468,8 @@ T2.Vehicle = (function () {
     // Calculate slip angle (how sideways the car is moving relative to where it's pointing)
     var slipRatio = Math.abs(state.localVelX) / (Math.abs(state.localVelZ) + 1.0);
 
-    // If slip ratio exceeds threshold, traction breaks and the car slides
-    var slideGripMult = (slipRatio > 0.35) ? 0.35 : 1.0;
+    // Smoother slip angle curve for predictable breaking of traction
+    var slideGripMult = 1.0 / (1.0 + Math.pow(slipRatio * 2.5, 2));
 
     // Base lateral grip is higher, but drops drastically when sliding
     var lateralBase = isHandbrake ? 1.5 : 18.0;
