@@ -15,6 +15,11 @@ window.T2 = window.T2 || {};
 //  - Airborne: car leaves ground over crests; floor uses lowest
 //    wheel-position terrain sample + 0.25 m penetration threshold.
 //
+// MESH:
+//  - Retro Escort MK1-inspired rally car (original design, no real-world branding).
+//  - White rally livery with red stripe, 4-lamp roof light bar, flared arches,
+//    chrome bumpers, roll cage, 5-spoke alloys, exhaust, mud flaps.
+//
 // DAMAGE MODEL:
 //  - state.health (0-100): drains on collisions proportional to impact speed.
 //  - Speed capped at MAX_SPEED * (0.5 + health/200).
@@ -57,11 +62,8 @@ T2.Vehicle = (function () {
   var FLYWHEEL_INERTIA = 0.22;
 
   // ── Traction model ──────────────────────────────────────────────────────────
-  // Maximum force a tyre can transmit = mu * normal_load.
-  // mu_tyre is the tyre-road friction peak (separate from terrain rolling friction).
-  // When commanded drive force exceeds this cap, excess becomes wheelspin.
-  var MU_TYRE          = 1.1;   // dry tyre peak (typical passenger car)
-  var WHEELSPIN_BLEND  = 6.0;   // how fast grip recovers once force drops back under cap
+  var MU_TYRE          = 1.1;
+  var WHEELSPIN_BLEND  = 6.0;
 
   var WEIGHT_TRANSFER  = 0.18;
 
@@ -70,6 +72,11 @@ T2.Vehicle = (function () {
   var DAMAGE_FLASH_DURATION  = 0.30;
   var HIT_COOLDOWN           = 0.18;
   var DAMAGE_PER_MS          = 4.2;
+
+  // ── Car body base colour (white rally livery) ────────────────────────────────
+  var BODY_BASE_R = 0xF2 / 255;
+  var BODY_BASE_G = 0xF0 / 255;
+  var BODY_BASE_B = 0xE8 / 255;
 
   // ── State ───────────────────────────────────────────────────────────────────
   var state = {
@@ -91,7 +98,7 @@ T2.Vehicle = (function () {
     currentGear:  0,
     shiftTimer:   0,
     engineRPM:    RPM_IDLE,
-    tractionGrip: 1.0,   // 0-1, recovered each frame
+    tractionGrip: 1.0,
     health:       100,
     damageFlash:  0,
     isWrecked:    false,
@@ -103,7 +110,7 @@ T2.Vehicle = (function () {
   var winchState = {
     active:     false,
     targetId:   null,
-    restLength: 10.0,   // cable rest length in metres
+    restLength: 10.0,
   };
 
   var wheels = [];
@@ -121,8 +128,9 @@ T2.Vehicle = (function () {
     });
   }
 
-  var vehicleGroup = null;
-  var bodyMeshRef  = null;
+  var vehicleGroup    = null;
+  var bodyMeshRef     = null;
+  var bodyColorMeshes = [];   // all white-body panels — updated together for damage tint
 
   // ── Helpers ─────────────────────────────────────────────────────────────────
   function clamp(v, lo, hi) { return Math.max(lo, Math.min(hi, v)); }
@@ -137,54 +145,270 @@ T2.Vehicle = (function () {
     return TORQUE_CURVE[lo] * (1 - t) + TORQUE_CURVE[hi] * t;
   }
 
-  function makeMaterial(hex) {
-    return new THREE.MeshLambertMaterial({ color: hex, flatShading: true });
-  }
-
-  // ── Mesh construction ────────────────────────────────────────────────────────
+  // ── Mesh construction — Retro Rally Car ──────────────────────────────────────
   function buildMesh(scene) {
-    vehicleGroup = new THREE.Group();
+    vehicleGroup    = new THREE.Group();
+    bodyColorMeshes = [];
 
-    var bodyGeo  = new THREE.BoxGeometry(2.2, 0.6, 4.2);
-    var bodyMat  = makeMaterial(0xc83820);
-    var bodyMesh = new THREE.Mesh(bodyGeo, bodyMat);
-    bodyMesh.position.y = 0;
-    vehicleGroup.add(bodyMesh);
-    bodyMeshRef = bodyMesh;
+    // Palette
+    var C_WHITE  = 0xF2F0E8;
+    var C_RED    = 0xCC1A1A;
+    var C_BLACK  = 0x111111;
+    var C_CHROME = 0xB8B8B8;
+    var C_SILVER = 0x888888;
+    var C_YELLOW = 0xFFD060;
+    var C_GLASS  = 0x88AACC;
+    var C_DARK   = 0x1a1a1a;
+    var C_GREY   = 0x444444;
+    var C_RUST   = 0x8B3A10;
 
-    var cabinGeo  = new THREE.BoxGeometry(1.8, 0.7, 2.2);
-    var cabinMesh = new THREE.Mesh(cabinGeo, makeMaterial(0xa02810));
-    cabinMesh.position.set(0, 0.65, -0.25);
-    vehicleGroup.add(cabinMesh);
+    function mat(hex) {
+      return new THREE.MeshLambertMaterial({ color: hex, flatShading: true });
+    }
+    function matAlpha(hex, opacity) {
+      return new THREE.MeshLambertMaterial({
+        color: hex, transparent: true, opacity: opacity, flatShading: true,
+      });
+    }
+    // Adds a mesh to vehicleGroup; if isBody=true, registers it for damage tinting
+    function add(geo, material, px, py, pz, isBody) {
+      var mesh = new THREE.Mesh(geo, material);
+      if (px !== undefined) mesh.position.set(px, py, pz);
+      vehicleGroup.add(mesh);
+      if (isBody) bodyColorMeshes.push(mesh);
+      return mesh;
+    }
 
-    var bGeo    = new THREE.BoxGeometry(2.3, 0.28, 0.32);
-    var bumperF = new THREE.Mesh(bGeo, makeMaterial(0x282828));
-    bumperF.position.set(0, -0.1, 2.28);
-    vehicleGroup.add(bumperF);
+    // ─── LOWER BODY HULL ──────────────────────────────────────────────────────
+    var lowerBody = add(
+      new THREE.BoxGeometry(2.20, 0.52, 4.08), mat(C_WHITE), 0, -0.08, -0.04, true
+    );
+    bodyMeshRef = lowerBody;
 
-    var bumperR = new THREE.Mesh(bGeo, makeMaterial(0x282828));
-    bumperR.position.set(0, -0.1, -2.28);
-    vehicleGroup.add(bumperR);
+    // Sill reinforcement strips
+    [-1.11, 1.11].forEach(function(x) {
+      add(new THREE.BoxGeometry(0.08, 0.52, 3.80), mat(C_BLACK), x, -0.08, -0.04);
+    });
 
-    var rackGeo  = new THREE.BoxGeometry(1.6, 0.08, 1.8);
-    var rackMesh = new THREE.Mesh(rackGeo, makeMaterial(0x181818));
-    rackMesh.position.set(0, 1.04, -0.25);
-    vehicleGroup.add(rackMesh);
+    // Red rally stripe (lower body band)
+    add(new THREE.BoxGeometry(2.22, 0.13, 4.12), mat(C_RED), 0, -0.30, -0.04);
 
-    var tyreMat = makeMaterial(0x1a1a1a);
-    var hubMat  = makeMaterial(0x707070);
+    // ─── WHEEL ARCH FLARES ────────────────────────────────────────────────────
+    var archPositions = [[-1.18, 1.55], [1.18, 1.55], [-1.18, -1.55], [1.18, -1.55]];
+    archPositions.forEach(function(o) {
+      add(new THREE.BoxGeometry(0.13, 0.32, 1.05), mat(C_WHITE), o[0], -0.02, o[1], true);
+      // Arch lip
+      add(new THREE.BoxGeometry(0.14, 0.06, 1.08), mat(C_BLACK), o[0], -0.20, o[1]);
+    });
+
+    // ─── CABIN (upper body) ───────────────────────────────────────────────────
+    var cabin = add(
+      new THREE.BoxGeometry(1.78, 0.65, 2.08), mat(C_WHITE), 0, 0.58, -0.18, true
+    );
+
+    // ─── ROOF PANEL ───────────────────────────────────────────────────────────
+    add(new THREE.BoxGeometry(1.80, 0.08, 2.10), mat(0xE0DDD5), 0, 0.92, -0.18, true);
+
+    // ─── BONNET (hood) ────────────────────────────────────────────────────────
+    add(new THREE.BoxGeometry(2.10, 0.09, 1.28), mat(C_WHITE), 0, 0.20, 1.62, true);
+    // Power bulge (intake scoop)
+    add(new THREE.BoxGeometry(0.44, 0.10, 0.78), mat(0xD8D5CC), 0, 0.25, 1.62, true);
+    // Bonnet vents (louvres)
+    [-0.28, 0, 0.28].forEach(function(x) {
+      add(new THREE.BoxGeometry(0.10, 0.04, 0.48), mat(C_BLACK), x, 0.26, 1.62);
+    });
+
+    // ─── BOOT LID (trunk) ─────────────────────────────────────────────────────
+    add(new THREE.BoxGeometry(2.10, 0.09, 0.88), mat(C_WHITE), 0, 0.20, -1.68, true);
+
+    // ─── WINDSCREEN FRAME ─────────────────────────────────────────────────────
+    // Top rail
+    add(new THREE.BoxGeometry(1.80, 0.09, 0.07), mat(C_BLACK), 0, 0.90, 0.84);
+    // Bottom rail
+    add(new THREE.BoxGeometry(1.80, 0.07, 0.07), mat(C_BLACK), 0, 0.26, 0.82);
+    // A-pillars
+    [-0.86, 0.86].forEach(function(x) {
+      add(new THREE.BoxGeometry(0.07, 0.65, 0.07), mat(C_BLACK), x, 0.58, 0.83);
+    });
+    // Windscreen glass
+    add(
+      new THREE.BoxGeometry(1.64, 0.56, 0.04),
+      matAlpha(C_GLASS, 0.42),
+      0, 0.60, 0.83
+    );
+
+    // ─── REAR WINDOW ──────────────────────────────────────────────────────────
+    // Frame
+    add(new THREE.BoxGeometry(1.72, 0.09, 0.07), mat(C_BLACK), 0, 0.90, -1.22);
+    add(new THREE.BoxGeometry(1.72, 0.07, 0.07), mat(C_BLACK), 0, 0.26, -1.22);
+    [-0.83, 0.83].forEach(function(x) {
+      add(new THREE.BoxGeometry(0.07, 0.65, 0.07), mat(C_BLACK), x, 0.58, -1.22);
+    });
+    add(
+      new THREE.BoxGeometry(1.58, 0.52, 0.04),
+      matAlpha(C_GLASS, 0.38),
+      0, 0.58, -1.22
+    );
+
+    // ─── SIDE WINDOWS ─────────────────────────────────────────────────────────
+    [-0.90, 0.90].forEach(function(x) {
+      add(
+        new THREE.BoxGeometry(0.04, 0.52, 1.90),
+        matAlpha(C_GLASS, 0.30),
+        x, 0.58, -0.18
+      );
+    });
+
+    // ─── RECTANGULAR HEADLIGHTS (twin, classic Escort style) ──────────────────
+    [[-0.60, 2.08], [0.60, 2.08]].forEach(function(o) {
+      // Surround
+      add(new THREE.BoxGeometry(0.56, 0.30, 0.07), mat(C_BLACK), o[0], 0.14, o[1]);
+      // Lens
+      add(new THREE.BoxGeometry(0.48, 0.22, 0.06), mat(0xFFFACC), o[0], 0.14, o[1] + 0.01);
+      // Inner divider (twin-headlight look)
+      add(new THREE.BoxGeometry(0.04, 0.22, 0.07), mat(C_BLACK), o[0], 0.14, o[1] + 0.02);
+    });
+
+    // ─── FRONT GRILLE ─────────────────────────────────────────────────────────
+    add(new THREE.BoxGeometry(1.08, 0.22, 0.06), mat(C_BLACK), 0, 0.14, 2.09);
+    // Grille bars
+    [-0.10, 0.10].forEach(function(y) {
+      add(new THREE.BoxGeometry(1.06, 0.03, 0.05), mat(C_CHROME), 0, 0.14 + y, 2.10);
+    });
+
+    // ─── TAIL LIGHTS ──────────────────────────────────────────────────────────
+    [[-0.68, -2.08], [0.68, -2.08]].forEach(function(o) {
+      add(new THREE.BoxGeometry(0.48, 0.24, 0.07), mat(C_RED),   o[0],      0.10, o[1]);
+      // Reverse lamp (inner strip, white)
+      add(new THREE.BoxGeometry(0.18, 0.12, 0.06), mat(0xEEEECC), o[0] + (o[0] < 0 ? 0.15 : -0.15), 0.10, o[1] + 0.01);
+    });
+    // Centre brake strip
+    add(new THREE.BoxGeometry(0.48, 0.10, 0.05), mat(C_RED), 0, 0.18, -2.08);
+
+    // ─── FRONT BUMPER (chrome steel) ──────────────────────────────────────────
+    add(new THREE.BoxGeometry(2.32, 0.20, 0.16), mat(C_CHROME), 0, -0.04, 2.15);
+    // Bash plate / skid plate
+    add(new THREE.BoxGeometry(2.22, 0.10, 0.14), mat(C_GREY), 0, -0.20, 2.15);
+    // Tow hook
+    add(new THREE.BoxGeometry(0.08, 0.24, 0.10), mat(C_BLACK), 0, -0.20, 2.22);
+
+    // ─── REAR BUMPER ──────────────────────────────────────────────────────────
+    add(new THREE.BoxGeometry(2.32, 0.20, 0.16), mat(C_CHROME), 0, -0.04, -2.15);
+    // Tow hook rear
+    add(new THREE.BoxGeometry(0.08, 0.22, 0.10), mat(C_BLACK), 0, -0.20, -2.22);
+
+    // ─── ROOF RALLY LIGHT BAR ─────────────────────────────────────────────────
+    // Mounting stanchions
+    [-0.70, 0.70].forEach(function(x) {
+      add(new THREE.BoxGeometry(0.06, 0.22, 0.06), mat(C_BLACK), x, 1.05, 0.08);
+    });
+    // Main horizontal bar
+    add(new THREE.BoxGeometry(1.54, 0.09, 0.16), mat(C_BLACK), 0, 1.17, 0.08);
+    // 4 lamp housings
+    [-0.54, -0.18, 0.18, 0.54].forEach(function(x) {
+      add(new THREE.BoxGeometry(0.28, 0.24, 0.20), mat(C_BLACK), x, 1.17, 0.20);
+      add(new THREE.BoxGeometry(0.24, 0.20, 0.06), mat(C_YELLOW), x, 1.17, 0.31);
+      // Lamp ring
+      add(new THREE.BoxGeometry(0.26, 0.22, 0.03), mat(C_CHROME), x, 1.17, 0.30);
+    });
+
+    // ─── ROLL CAGE (visible through glass) ────────────────────────────────────
+    // Main hoop
+    add(new THREE.BoxGeometry(1.62, 0.06, 0.06), mat(C_SILVER), 0, 0.90, -0.20);
+    [-0.78, 0.78].forEach(function(x) {
+      add(new THREE.BoxGeometry(0.06, 0.64, 0.06), mat(C_SILVER), x, 0.58, -0.20);
+    });
+    // Front diagonal brace
+    add(new THREE.BoxGeometry(0.06, 0.55, 0.06), mat(C_SILVER), -0.78, 0.65, 0.50);
+    add(new THREE.BoxGeometry(0.06, 0.55, 0.06), mat(C_SILVER),  0.78, 0.65, 0.50);
+
+    // ─── EXHAUST PIPE ─────────────────────────────────────────────────────────
+    var exGeo = new THREE.CylinderGeometry(0.055, 0.065, 0.60, 8);
+    var ex = new THREE.Mesh(exGeo, mat(C_GREY));
+    ex.rotation.z = Math.PI / 2;
+    ex.position.set(-1.14, -0.32, -1.82);
+    vehicleGroup.add(ex);
+    // Exhaust tip
+    var exTipGeo = new THREE.CylinderGeometry(0.07, 0.07, 0.06, 8);
+    var exTip = new THREE.Mesh(exTipGeo, mat(C_CHROME));
+    exTip.rotation.z = Math.PI / 2;
+    exTip.position.set(-1.44, -0.32, -1.82);
+    vehicleGroup.add(exTip);
+
+    // ─── SIDE MIRRORS ─────────────────────────────────────────────────────────
+    [[-1.12, 0.76], [1.12, 0.76]].forEach(function(o) {
+      var side = o[0] < 0 ? -1 : 1;
+      add(new THREE.BoxGeometry(0.16, 0.06, 0.06), mat(C_BLACK), o[0], 0.40, o[1]);
+      add(new THREE.BoxGeometry(0.11, 0.14, 0.10), mat(C_BLACK), o[0] + side * 0.10, 0.44, o[1]);
+    });
+
+    // ─── MUD FLAPS ────────────────────────────────────────────────────────────
+    [[-1.10, 0.98], [1.10, 0.98], [-1.10, -1.04], [1.10, -1.04]].forEach(function(o) {
+      add(new THREE.BoxGeometry(0.07, 0.30, 0.28), mat(C_BLACK), o[0], -0.30, o[1]);
+    });
+
+    // ─── NUMBER PLATE / COMPETITION ROUNDEL ───────────────────────────────────
+    // Front plate
+    add(new THREE.BoxGeometry(0.62, 0.36, 0.04), mat(0xFFFFFF), 0, 0.14, 2.10);
+    add(new THREE.BoxGeometry(0.58, 0.32, 0.03), mat(C_BLACK), 0, 0.14, 2.11);
+    // Rear plate
+    add(new THREE.BoxGeometry(0.62, 0.22, 0.04), mat(0xFFFFFF), 0, -0.02, -2.10);
+
+    // ─── AERIAL ───────────────────────────────────────────────────────────────
+    add(new THREE.BoxGeometry(0.03, 0.48, 0.03), mat(C_CHROME), 0.84, 1.14, -0.60);
+
+    // ─── WHEELS (5-spoke alloys) ──────────────────────────────────────────────
+    var tyreMat  = new THREE.MeshLambertMaterial({ color: C_DARK,   flatShading: true });
+    var rimMat   = new THREE.MeshLambertMaterial({ color: 0xD0D0CC, flatShading: true });
+    var spokeMat = new THREE.MeshLambertMaterial({ color: 0xAAAAAA, flatShading: true });
+    var hubMat   = new THREE.MeshLambertMaterial({ color: C_RED,    flatShading: true });
 
     for (var i = 0; i < 4; i++) {
-      var wGroup   = new THREE.Group();
-      var tyreGeo  = new THREE.CylinderGeometry(WHEEL_RADIUS, WHEEL_RADIUS, 0.32, 12);
+      var wGroup = new THREE.Group();
+
+      // Tyre
+      var tyreGeo  = new THREE.CylinderGeometry(WHEEL_RADIUS, WHEEL_RADIUS, 0.34, 16);
       var tyreMesh = new THREE.Mesh(tyreGeo, tyreMat);
       tyreMesh.rotation.z = Math.PI / 2;
       wGroup.add(tyreMesh);
 
-      var hubGeo  = new THREE.CylinderGeometry(0.18, 0.18, 0.34, 6);
-      var hubMesh = new THREE.Mesh(hubGeo, hubMat);
-      hubMesh.rotation.z = Math.PI / 2;
-      wGroup.add(hubMesh);
+      // Tyre sidewall detail ring
+      var swGeo = new THREE.CylinderGeometry(WHEEL_RADIUS - 0.02, WHEEL_RADIUS - 0.02, 0.36, 16);
+      var sw = new THREE.Mesh(swGeo, new THREE.MeshLambertMaterial({ color: 0x2a2a2a, flatShading: true }));
+      sw.rotation.z = Math.PI / 2;
+      wGroup.add(sw);
+
+      // Alloy rim face
+      var rimGeo = new THREE.CylinderGeometry(0.30, 0.30, 0.28, 16);
+      var rim = new THREE.Mesh(rimGeo, rimMat);
+      rim.rotation.z = Math.PI / 2;
+      wGroup.add(rim);
+
+      // 5 spokes radiating from centre in Y-Z plane
+      // (wheel axis is X after rotation.z = PI/2 on cylinder,
+      //  so spokes rotate around X axis)
+      for (var s = 0; s < 5; s++) {
+        var angle = (s / 5) * Math.PI * 2;
+        // Spoke as a thin box oriented vertically then rotated around X
+        var spGeo = new THREE.BoxGeometry(0.26, 0.06, 0.06);
+        var sp = new THREE.Mesh(spGeo, spokeMat);
+        // Place spoke at radial offset in Y-Z, rotated around X
+        sp.position.set(0, Math.sin(angle) * 0.14, Math.cos(angle) * 0.14);
+        sp.rotation.x = angle;
+        wGroup.add(sp);
+      }
+
+      // Hub cap (red centre)
+      var hubGeo = new THREE.CylinderGeometry(0.08, 0.08, 0.30, 8);
+      var hub = new THREE.Mesh(hubGeo, hubMat);
+      hub.rotation.z = Math.PI / 2;
+      wGroup.add(hub);
+
+      // Wheel nut ring
+      var nutGeo = new THREE.CylinderGeometry(0.06, 0.06, 0.32, 6);
+      var nut = new THREE.Mesh(nutGeo, rimMat);
+      nut.rotation.z = Math.PI / 2;
+      wGroup.add(nut);
 
       wGroup.position.set(WHEEL_OFFSETS[i].x, WHEEL_REST_Y, WHEEL_OFFSETS[i].z);
       vehicleGroup.add(wGroup);
@@ -226,7 +450,6 @@ T2.Vehicle = (function () {
     var sinY = Math.sin(yaw);
     var pos  = state.position;
 
-    // 1. Calculate base compressions first
     for (var i = 0; i < 4; i++) {
       var wo = WHEEL_OFFSETS[i];
       var wx = wo.x * cosY + wo.z * sinY;
@@ -243,32 +466,27 @@ T2.Vehicle = (function () {
       wheels[i].currentCompression = Math.max(0, SPRING_REST - currentLen);
     }
 
-    // 2. Anti-Roll Bar (ARB) calculations (Rally cars have stiff rear ARBs to induce oversteer)
     var ARB_FRONT = 35.0;
     var ARB_REAR  = 65.0;
     var rollFront = (wheels[0].currentCompression - wheels[1].currentCompression) * ARB_FRONT;
     var rollRear  = (wheels[2].currentCompression - wheels[3].currentCompression) * ARB_REAR;
 
-    // 3. Apply forces
     for (var i = 0; i < 4; i++) {
       if (wheels[i].currentCompression > 0) {
         var springForce = SPRING_K * wheels[i].currentCompression;
 
-        // Bump stop (extra stiffness near max compression)
         if (wheels[i].currentCompression > 0.45) {
           springForce += (wheels[i].currentCompression - 0.45) * 800;
         }
 
-        // Apply ARB transfer
-        if (i === 0) springForce += rollFront; // Front Left
-        if (i === 1) springForce -= rollFront; // Front Right
-        if (i === 2) springForce += rollRear;  // Rear Left
-        if (i === 3) springForce -= rollRear;  // Rear Right
+        if (i === 0) springForce += rollFront;
+        if (i === 1) springForce -= rollFront;
+        if (i === 2) springForce += rollRear;
+        if (i === 3) springForce -= rollRear;
 
-        // Separate bump and rebound damping
-        var isRebound = wheels[i].velocity > 0;
+        var isRebound    = wheels[i].velocity > 0;
         var currentDamper = isRebound ? SPRING_DAMPER * 1.5 : SPRING_DAMPER * 0.8;
-        var damperForce = currentDamper * wheels[i].velocity;
+        var damperForce  = currentDamper * wheels[i].velocity;
 
         var netForce    = springForce - damperForce;
         var accel       = netForce / WHEEL_MASS;
@@ -303,7 +521,6 @@ T2.Vehicle = (function () {
     var friction = terrainQ.surfaceType.friction;
     state.surfaceType = terrainQ.surfaceType;
 
-    // ── Pitch / roll from terrain ─────────────────────────────────────────────
     var cFL = wheels[0].contactY, cFR = wheels[1].contactY;
     var cRL = wheels[2].contactY, cRR = wheels[3].contactY;
     var avgFront = (cFL + cFR) * 0.5;
@@ -315,25 +532,20 @@ T2.Vehicle = (function () {
       state.pitch = lerp(state.pitch, Math.atan2(avgFront - avgRear, WHEELBASE), 8 * dt);
       state.roll  = lerp(state.roll,  Math.atan2(avgRight - avgLeft, 2.2),      8 * dt);
     } else {
-      // Air control
       var pitchInput = (T2.Input.brake() ? 1 : 0) - (T2.Input.throttle() ? 1 : 0);
       var rollInput  = (T2.Input.steerRight() ? 1 : 0) - (T2.Input.steerLeft() ? 1 : 0);
       state.pitch += pitchInput * 1.5 * dt;
       state.roll  += rollInput * 2.5 * dt;
-
-      // Auto-leveling slowly
       state.pitch = lerp(state.pitch, 0, 0.5 * dt);
       state.roll  = lerp(state.roll, 0, 0.5 * dt);
     }
 
-    // ── Gravity ───────────────────────────────────────────────────────────────
     if (!isGrounded) {
       state.velocity.y -= 9.81 * dt;
     } else {
       if (state.velocity.y < 0) state.velocity.y *= 0.3;
     }
 
-    // ── Local velocity decomposition ──────────────────────────────────────────
     var cosY = Math.cos(state.yaw);
     var sinY = Math.sin(state.yaw);
     var fwdX = sinY, fwdZ = cosY;
@@ -345,7 +557,6 @@ T2.Vehicle = (function () {
       state.velocity.x * state.velocity.x + state.velocity.z * state.velocity.z
     );
 
-    // ── Steering ──────────────────────────────────────────────────────────────
     var steerInput = 0;
     if (T2.Input.steerLeft())  steerInput = -1;
     if (T2.Input.steerRight()) steerInput =  1;
@@ -355,7 +566,6 @@ T2.Vehicle = (function () {
     wheels[0].group.rotation.y = state.currentSteer;
     wheels[1].group.rotation.y = state.currentSteer;
 
-    // ── Gearbox ───────────────────────────────────────────────────────────────
     if (state.shiftTimer > 0) state.shiftTimer -= dt;
     var fwdSpeed = state.localVelZ;
     if (isGrounded && state.shiftTimer <= 0) {
@@ -372,7 +582,6 @@ T2.Vehicle = (function () {
       }
     }
 
-    // ── Engine RPM ────────────────────────────────────────────────────────────
     var rpmLo = state.currentGear > 0 ? SHIFT_DOWN_SPEED[state.currentGear - 1] : 0;
     var rpmHi = state.currentGear < NUM_GEARS - 1 ? SHIFT_UP_SPEED[state.currentGear] : BASE_MAX_SPEED + 3;
     var rpmT  = clamp((Math.abs(fwdSpeed) - rpmLo) / Math.max(rpmHi - rpmLo, 0.1), 0, 1);
@@ -380,7 +589,6 @@ T2.Vehicle = (function () {
 
     var throttleInput = T2.Input.throttle() ? 1.0 : 0.0;
 
-    // Simulate clutch slip / engine revving when traction is broken
     if (throttleInput > 0 && state.tractionGrip < 0.95) {
       var slipRPM = (1.0 - state.tractionGrip) * (RPM_MAX - RPM_IDLE) * 0.5;
       targetRPM = Math.min(RPM_MAX, targetRPM + slipRPM);
@@ -394,13 +602,11 @@ T2.Vehicle = (function () {
     }
     state.engineRPM = clamp(state.engineRPM + rpmDelta, RPM_IDLE, RPM_MAX);
 
-    // ── Drive force — force-based traction cap ────────────────────────────────
-    // Weight transfer: accel loads rear, braking loads front.
     var MAX_SPEED   = BASE_MAX_SPEED * (0.5 + state.health / 200);
     var accelSign   = T2.Input.throttle() ? 1 : (T2.Input.brake() ? -1 : 0);
     var weightShift = accelSign * WEIGHT_TRANSFER * CAR_MASS * 9.81;
-    var rearLoad    = Math.max(CAR_MASS * 9.81 * 0.5 + weightShift, 100);  // total rear axle (N)
-    var frontLoad   = Math.max(CAR_MASS * 9.81 * 0.5 - weightShift, 100);  // total front axle (N)
+    var rearLoad    = Math.max(CAR_MASS * 9.81 * 0.5 + weightShift, 100);
+    var frontLoad   = Math.max(CAR_MASS * 9.81 * 0.5 - weightShift, 100);
 
     var driveForce = 0;
 
@@ -410,46 +616,34 @@ T2.Vehicle = (function () {
         var torqueFactor = sampleTorqueCurve(rpmNorm);
         var rawTorque    = PEAK_TORQUE_NM * torqueFactor * GEAR_RATIOS[state.currentGear];
 
-        // Torque interruption during shifts
         if (state.shiftTimer > 0) {
           rawTorque *= 0.2;
         }
 
-        // Requested drive force from engine
         var requestedForce = rawTorque / WHEEL_RADIUS;
+        var maxTyreForce   = MU_TYRE * rearLoad * friction;
 
-        // Maximum force rear tyres can transmit before spinning:
-        //   F_max = mu_tyre * normal_load * terrain_friction_modifier
-        // terrain friction already encodes surface grip (mud=0.18, grass=0.65, rock=0.82)
-        var maxTyreForce = MU_TYRE * rearLoad * friction;
-
-        // If requested > max, grip drops proportionally (wheelspin)
         if (requestedForce <= maxTyreForce) {
-          // Full traction — no slip
           driveForce = requestedForce;
           state.tractionGrip = Math.min(1.0, state.tractionGrip + WHEELSPIN_BLEND * dt);
         } else {
-          // Wheelspin: deliver capped force, reduce grip state
           var gripRatio = maxTyreForce / requestedForce;
           state.tractionGrip = lerp(state.tractionGrip, gripRatio, WHEELSPIN_BLEND * dt);
           driveForce = requestedForce * state.tractionGrip;
         }
 
       } else if (T2.Input.brake()) {
-        // Braking: front-biased, capped by front tyre capacity
-        var brakeTorque = PEAK_TORQUE_NM * 1.8;
+        var brakeTorque    = PEAK_TORQUE_NM * 1.8;
         var requestedBrake = brakeTorque / WHEEL_RADIUS;
         var maxBrakeForce  = MU_TYRE * frontLoad * friction;
         if (state.localVelZ > 0.5) {
           driveForce = -Math.min(requestedBrake, maxBrakeForce);
         } else {
-          // Reverse
           driveForce = -(PEAK_TORQUE_NM * 0.7 * friction) / WHEEL_RADIUS;
         }
         state.tractionGrip = Math.min(1.0, state.tractionGrip + WHEELSPIN_BLEND * dt);
 
       } else {
-        // Engine braking on coast
         var engineBrakeForce = (state.engineRPM - RPM_IDLE) / (RPM_MAX - RPM_IDLE) * 800;
         if (Math.abs(fwdSpeed) > 0.3) {
           driveForce = -Math.sign(fwdSpeed) * engineBrakeForce * friction;
@@ -462,26 +656,17 @@ T2.Vehicle = (function () {
     state.velocity.x += fwdX * driveAccel * dt;
     state.velocity.z += fwdZ * driveAccel * dt;
 
-    // ── Lateral damping (Rally Drift Grip) ───────────────────────────────────────────
     var isHandbrake = T2.Input.handbrake();
-
-    // Calculate slip angle (how sideways the car is moving relative to where it's pointing)
-    var slipRatio = Math.abs(state.localVelX) / (Math.abs(state.localVelZ) + 1.0);
-
-    // Smoother slip angle curve for predictable breaking of traction
+    var slipRatio   = Math.abs(state.localVelX) / (Math.abs(state.localVelZ) + 1.0);
     var slideGripMult = 1.0 / (1.0 + Math.pow(slipRatio * 2.5, 2));
-
-    // Base lateral grip is higher, but drops drastically when sliding
-    var lateralBase = isHandbrake ? 1.5 : 18.0;
-    var lateralDamp = friction * lateralBase * slideGripMult * dt;
-
+    var lateralBase   = isHandbrake ? 1.5 : 18.0;
+    var lateralDamp   = friction * lateralBase * slideGripMult * dt;
     lateralDamp = clamp(lateralDamp, 0, 1);
     state.velocity.x -= rtX * state.localVelX * lateralDamp;
     state.velocity.z -= rtZ * state.localVelX * lateralDamp;
 
-    // ── Aerodynamic drag + rolling resistance ─────────────────────────────────
     if (state.speed > 0.05) {
-      var drag      = state.speed * state.speed * 0.025 + state.speed * friction * 0.28;
+      var drag = state.speed * state.speed * 0.025 + state.speed * friction * 0.28;
       if (state.surfaceType && state.surfaceType.name === 'DEEP WATER') {
         drag += state.speed * state.speed * 1.5 + state.speed * 4.0;
       } else if (state.surfaceType && state.surfaceType.name === 'WATER') {
@@ -493,7 +678,6 @@ T2.Vehicle = (function () {
       state.velocity.z -= state.velocity.z * invSpeed * dragDecel * dt;
     }
 
-    // ── Yaw rate (bicycle model) ──────────────────────────────────────────────
     if (isGrounded && Math.abs(state.localVelZ) > 0.4) {
       var steerSign     = state.localVelZ > 0 ? 1 : -1;
       var targetYawRate = (state.localVelZ * Math.tan(state.currentSteer) / WHEELBASE) * steerSign;
@@ -503,7 +687,6 @@ T2.Vehicle = (function () {
     }
     state.yaw += state.yawRate * dt;
 
-    // ── Speed cap ─────────────────────────────────────────────────────────────
     var horizSpeed = Math.sqrt(
       state.velocity.x * state.velocity.x + state.velocity.z * state.velocity.z
     );
@@ -513,12 +696,10 @@ T2.Vehicle = (function () {
       state.velocity.z *= scale;
     }
 
-    // ── Integrate position ────────────────────────────────────────────────────
     state.position.x += state.velocity.x * dt;
     state.position.y += state.velocity.y * dt;
     state.position.z += state.velocity.z * dt;
 
-    // ── Terrain grounding — per-wheel contact ─────────────────────────────────
     var groundedWheels = 0;
     var minContactY    = Infinity;
     for (var gi = 0; gi < 4; gi++) {
@@ -534,8 +715,6 @@ T2.Vehicle = (function () {
         if (state.velocity.y < 0) state.velocity.y = 0;
       }
     } else {
-      // Airborne: use lowest terrain sample at all 4 wheel world positions
-      // so the floor drops away behind a crest instead of chasing the car up.
       var AIRBORNE_THRESHOLD = 0.25;
       var yawA  = state.yaw;
       var cosA  = Math.cos(yawA);
@@ -555,7 +734,6 @@ T2.Vehicle = (function () {
       }
     }
 
-    // ── Prop collision ────────────────────────────────────────────────────────
     var propColliders = T2.Props.getColliders();
     for (var pi = 0; pi < propColliders.length; pi++) {
       var pc  = propColliders[pi];
@@ -585,7 +763,6 @@ T2.Vehicle = (function () {
       }
     }
 
-    // ── Car-vs-car collision ──────────────────────────────────────────────────
     if (T2.Multiplayer && T2.Multiplayer.getColliders) {
       var carColliders = T2.Multiplayer.getColliders();
       for (var ci = 0; ci < carColliders.length; ci++) {
@@ -614,7 +791,6 @@ T2.Vehicle = (function () {
       }
     }
 
-    // ── Timers ────────────────────────────────────────────────────────────────
     if (state.impactTimer > 0) { state.impactTimer -= dt; if (state.impactTimer < 0) state.impactTimer = 0; }
     if (state.damageFlash > 0) { state.damageFlash -= dt; if (state.damageFlash < 0) state.damageFlash = 0; }
 
@@ -625,7 +801,6 @@ T2.Vehicle = (function () {
     if (absRoll > 1.3) { state.flipTimer += dt; state.isFlipped = true; }
     else               { state.flipTimer = 0;   state.isFlipped = false; }
 
-    // ── Reset (R) ─────────────────────────────────────────────────────────────
     if (T2.Input.isDown('KeyR')) {
       var groundAtReset = T2.Terrain.query(state.position.x, state.position.z).height;
       state.position.y  = groundAtReset + 2.5;
@@ -668,9 +843,8 @@ T2.Vehicle = (function () {
     var dz   = target.position.z - state.position.z;
     var dist = Math.sqrt(dx * dx + dy * dy + dz * dz);
 
-    // Hooke's Law: only pull when stretched beyond rest length
     if (dist > winchState.restLength) {
-      var k     = 800.0;   // spring stiffness (N/m)
+      var k     = 800.0;
       var force = (dist - winchState.restLength) * k;
       state.velocity.x += (dx / dist) * force * dt / CAR_MASS;
       state.velocity.y += (dy / dist) * force * dt / CAR_MASS;
@@ -701,23 +875,28 @@ T2.Vehicle = (function () {
       vehicleGroup.scale.set(1, 1, 1);
     }
 
-    if (bodyMeshRef) {
+    // ── Body colour: white livery with orange flash on hit, grey on damage ─────
+    if (bodyColorMeshes.length > 0) {
+      var r, g, b;
       if (state.damageFlash > 0) {
-        var t  = state.damageFlash / DAMAGE_FLASH_DURATION;
-        var r  = Math.round(lerp(0xc8, 0xff, t));
-        var g  = Math.round(lerp(0x38, 0x88, t));
-        var b  = Math.round(lerp(0x20, 0x00, t));
-        bodyMeshRef.material.color.setRGB(r / 255, g / 255, b / 255);
+        // Flash from orange (hit) back to white
+        var t = state.damageFlash / DAMAGE_FLASH_DURATION;
+        r = lerp(BODY_BASE_R, 1.00, t);
+        g = lerp(BODY_BASE_G, 0.40, t);
+        b = lerp(BODY_BASE_B, 0.00, t);
+      } else if (state.health < 40) {
+        // Gradually darken toward charred grey as health drops
+        var dmgT = (40 - state.health) / 40;
+        r = lerp(BODY_BASE_R, 0.22, dmgT);
+        g = lerp(BODY_BASE_G, 0.20, dmgT);
+        b = lerp(BODY_BASE_B, 0.18, dmgT);
       } else {
-        if (state.health < 40) {
-          var dmgT = (40 - state.health) / 40;
-          var dr   = Math.round(lerp(0xc8, 0x60, dmgT));
-          var dg   = Math.round(lerp(0x38, 0x10, dmgT));
-          var db   = Math.round(lerp(0x20, 0x08, dmgT));
-          bodyMeshRef.material.color.setRGB(dr / 255, dg / 255, db / 255);
-        } else {
-          bodyMeshRef.material.color.setHex(0xc83820);
-        }
+        r = BODY_BASE_R;
+        g = BODY_BASE_G;
+        b = BODY_BASE_B;
+      }
+      for (var mi = 0; mi < bodyColorMeshes.length; mi++) {
+        bodyColorMeshes[mi].material.color.setRGB(r, g, b);
       }
     }
   }
@@ -749,7 +928,7 @@ T2.Vehicle = (function () {
         console.log('Winch detached');
       } else {
         var players     = (T2.Multiplayer && T2.Multiplayer.getPlayers) ? T2.Multiplayer.getPlayers() : {};
-        var closestDist = 20.0;   // max attach distance (m)
+        var closestDist = 20.0;
         var closestId   = null;
 
         for (var wid in players) {
